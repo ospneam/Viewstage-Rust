@@ -38,9 +38,9 @@
 
 | 字段 | 真实作用 | 消费点 |
 | --- | --- | --- |
-| `canvas.annotation_fps_cap` | 批注热路径渲染帧率上限（30–240）。**全应用最有效的性能旋钮**——144/165Hz 屏上批注 60fps 已足够顺滑，限帧线性降低 GPU 占用与功耗 | `App::paced_redraw` |
-| `renderer.present_mode` | `ICED_PRESENT_MODE=mailbox` vs 默认 AutoVsync。垂直同步 = GPU 占用/功耗最低；无背压 = 延迟最低但核显持续满载 | `main()` 启动期 |
-| `renderer.prefer_integrated_gpu` | `WGPU_POWER_PREF=low`，双显卡笔记本锁定核显避免唤醒独显 | `main()` 启动期 |
+| `canvas.annotation_fps_cap` | 批注热路径渲染帧率上限（30–240）。**全应用最有效的性能旋钮**——144/165Hz 屏上批注 60fps 已足够顺滑，限帧线性降低 GPU 占用与功耗 | `viewframe::FrameDriver::paced_redraw` |
+| `renderer.present_mode` | `ICED_PRESENT_MODE=mailbox` vs 默认 AutoVsync。垂直同步 = GPU 占用/功耗最低；无背压 = 延迟最低但核显持续满载 | `viewframe::boot::apply_present_mode`（`main()` 启动期调用） |
+| `renderer.prefer_integrated_gpu` | `WGPU_POWER_PREF=low`，双显卡笔记本锁定核显避免唤醒独显 | `viewframe::boot::apply_power_pref`（`main()` 启动期调用） |
 
 后两项在**创建 wgpu 实例之前**读取，因此运行期改动需重启——设置页顶部有
 明确的"需重启生效"提示条，handler 也会回填 `settings_feedback`。
@@ -98,6 +98,8 @@
 
 图标注册表（`src/views/icons.rs`）中 9 个零引用项已删除，对应 8 个 SVG 资产
 一并移除。`file-earmark-image` 映射的 `file-earmark-image-fill.svg` 同样移除。
+（该注册表现只保留"用哪些图标"；解析与栅格化在 `viewicon`，SVG 资产也已迁至
+`crates/viewicon/assets/icons/`。）
 现注册表 21 项与资产目录 13 个文件一一对应，每个都有真实引用点。
 
 `viewicon` 里的 `blackboard_evenodd_style_path` 测试改名为

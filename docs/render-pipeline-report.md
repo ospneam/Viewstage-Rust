@@ -40,8 +40,9 @@ CPU 只产出**线段表**（`StrokeSeg`，64B/段：两端点+半宽+两端直�
 
 `sys::touch` 的 `WH_CALLWNDPROC` hook 捕获 `WM_POINTER*` / 鼠标消息 →
 写入 `Mutex` 队列 + `InvalidateRect` → winit `RedrawRequested` →
-`canvas::Program::update` 内 `drain_touch_zero_msg()` **零消息**直写 `LiveCanvasState` →
-`direct` 通道 `prepare` 上传。收笔 finalize 因需 `&mut` 延迟为 `TouchFinalize` 消息（每笔一次）。
+`canvas::Program::update` 内 `on_touch()` **零消息**直写 `LiveCanvasState`
+（经 `viewgfx::CanvasGfx`）→ `direct` 通道 `prepare` 上传。收笔 finalize 因需
+`&mut` 延迟为 `TouchFinalize` 消息（每笔一次）。
 
 实测 `view_avg=0.02ms`：UI widget 树在书写期间完全不重建。**这条链路正确，未改动。**
 

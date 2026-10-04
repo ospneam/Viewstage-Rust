@@ -7,12 +7,13 @@
 
 ```
 输入/相机帧
-  ├─ 触控/笔 → sys::touch hook → InvalidateRect → RedrawRequested（零消息）
-  │     └─ canvas::Program::update → drain_touch_zero_msg() → step_momentum()
+  ├─ 触控/笔 → 框架原生 `Event::Touch` → RedrawRequested（零消息）
+  │     └─ canvas::Program::update → on_touch() → step_momentum()
   └─ 消息（工具栏点击 / 相机帧 / 笔画完成）→ update() → view() 重建 → 重绘
                                                           ↓
 Renderer::draw
-  ├─ App::draw：写 viewport / last_frame_start / perf 采样
+  ├─ App::draw（`canvas::Program::draw`）：委派给 viewframe::FrameMetrics
+  │    写 viewport / 帧起点 / perf 采样，并调 gfx.refresh_live_geometry()
   ├─ prepare(encoder, viewport)
   │   ├─ CameraChannel：变换 uniform（变化才写 belt）+ 帧纹理（代数才重传）
   │   └─ AnnotationLayer：变换 uniform + 静态层（快照/视口门控）
