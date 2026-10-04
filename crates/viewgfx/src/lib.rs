@@ -34,6 +34,7 @@ mod background;
 mod live_geo;
 mod mesh_cache;
 mod trail;
+pub mod view;
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;

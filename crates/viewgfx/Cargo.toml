@@ -12,3 +12,7 @@ iced = { version = "0.14", default-features = false, features = ["wgpu", "canvas
 viewink = { path = "../viewink" }
 # 相机层（CameraFrameData / CameraLayer / YUV 矩阵标志）
 viewcamera = { path = "../viewcamera" }
+# 手势/变换的纯函数层（ScreenTransform 及其缩放钳位常量）。
+# view.rs 的画布视图变换复用 ScreenTransform::apply_pinch 的锚点缩放数学，
+# 以免同一段算法出现两份实现而各自漂移。
+viewcore-touch = { path = "../viewcore-touch" }

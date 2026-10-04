@@ -41,7 +41,7 @@ struct ImageEntry {
 use app::source_manager::{SourceId, SourceManager, SourceState};
 use viewink::ink::history::{DrawCommand, HistoryManager, UndoneCommand};
 use viewink::ink::stroke::DrawStroke;
-use viewcore_touch::{Momentum, ScreenTransform};
+use viewcore_touch::Momentum;
 
 // ==================
 // 输入诊断计数器（并入渲染层 stats 的 1 秒报表）
@@ -453,16 +453,16 @@ impl App {
             .get(self.selected_size)
             .copied()
             .unwrap_or(5.0);
-        base / self.live.transform.scale.get()
+        base / self.canvas_view().scale()
+    }
+
+    /// 画布视图变换的操作面（缩放 / 平移 / 屏幕↔画布换算）。
+    fn canvas_view(&self) -> viewgfx::view::CanvasView<'_> {
+        viewgfx::view::CanvasView::new(&self.live)
     }
 
     fn screen_to_canvas(&self, screen_x: f32, screen_y: f32) -> (f32, f32) {
-        ScreenTransform::new(
-            self.live.transform.offset_x.get(),
-            self.live.transform.offset_y.get(),
-            self.live.transform.scale.get(),
-        )
-        .screen_to_canvas(screen_x, screen_y)
+        self.canvas_view().screen_to_canvas(screen_x, screen_y)
     }
 
     fn send_camera_command(&mut self, cmd: CameraCommand) {
@@ -591,9 +591,9 @@ impl App {
             // 共享快照而非深拷贝：切源期间可能有后台任务持有这份快照，
             // `EraserSet` 的写时复制保证它不会被后续变更改动。
             eraser_strokes: self.erasers.shared(),
-            scale: self.live.transform.scale.get(),
-            offset_x: self.live.transform.offset_x.get(),
-            offset_y: self.live.transform.offset_y.get(),
+            scale: self.canvas_view().scale(),
+            offset_x: self.canvas_view().offset().0,
+            offset_y: self.canvas_view().offset().1,
             current_image_index: self.current_image_index,
             showing_image: self.showing_image,
             history: self.history.clone(),
@@ -608,9 +608,8 @@ impl App {
         // 不动 `eraser_generation`：切源本来就会走 `rebuild_stroke_mesh_cache`
         // 全量重算，代数语义保持不变。
         self.erasers.replace(state.eraser_strokes.as_ref().clone());
-        self.live.transform.scale.set(state.scale);
-        self.live.transform.offset_x.set(state.offset_x);
-        self.live.transform.offset_y.set(state.offset_y);        self.current_image_index = state.current_image_index;
+        self.canvas_view().set_view(state.scale, state.offset_x, state.offset_y);
+        self.current_image_index = state.current_image_index;
         self.showing_image = state.showing_image;
         self.history = state.history;
         self.rebuild_stroke_mesh_cache();
@@ -645,9 +644,7 @@ impl App {
             // 首次进入该源，重置为默认
             self.strokes.clear();
             self.erasers.clear();
-            self.live.transform.scale.set(1.0);
-            self.live.transform.offset_x.set(0.0);
-            self.live.transform.offset_y.set(0.0);
+            self.canvas_view().reset();
             self.current_image_index = None;
             self.showing_image = false;
             self.history.clear();
@@ -855,8 +852,7 @@ impl App {
             .min(0.1);
         self.last_frame_tick_time.set(now);
         if let Some((dx, dy)) = self.momentum.borrow_mut().tick(dt) {
-            self.live.transform.offset_x.set(self.live.transform.offset_x.get() + dx);
-            self.live.transform.offset_y.set(self.live.transform.offset_y.get() + dy);
+            self.canvas_view().pan_by(dx, dy);
         }
         viewframe::Instrument::set_redraw_source(viewframe::RedrawSource::Momentum);
         Some(Action::request_redraw())
@@ -962,12 +958,7 @@ fn on_touch(&self, touch: &iced::touch::Event, position: Point) -> Option<Action
                     DrawMode::Move => {
                         if let Some((px, py)) = self.last_mouse_pos.get() {
                             let (dx, dy) = (x as f64 - px, y as f64 - py);
-                            self.live.transform.offset_x.set(
-                                self.live.transform.offset_x.get() + dx as f32,
-                            );
-                            self.live.transform.offset_y.set(
-                                self.live.transform.offset_y.get() + dy as f32,
-                            );
+                            self.canvas_view().pan_by(dx as f32, dy as f32);
                             self.last_pan_delta.set((dx, dy));
                         }
                         self.last_mouse_pos.set(Some((x as f64, y as f64)));
@@ -1568,12 +1559,10 @@ fn on_touch(&self, touch: &iced::touch::Event, position: Point) -> Option<Action
             }
             Message::CanvasWheelScroll { delta, cursor } => {
                 let zoom = if delta > 0.0 { 1.1 } else { 0.9 };
-                let new_scale = (self.live.transform.scale.get() * zoom).clamp(0.1, 10.0);
-                let world_x = (cursor.x - self.live.transform.offset_x.get()) / self.live.transform.scale.get();
-                let world_y = (cursor.y - self.live.transform.offset_y.get()) / self.live.transform.scale.get();
-                self.live.transform.offset_x.set(cursor.x - world_x * new_scale);
-                self.live.transform.offset_y.set(cursor.y - world_y * new_scale);
-                self.live.transform.scale.set(new_scale);
+                // 锚点缩放与钳位交给 `CanvasView::zoom_at`（内部复用
+                // `ScreenTransform::apply_pinch`），此处不再手写世界坐标换算，
+                // 缩放上下限也随 MIN_SCALE/MAX_SCALE 单一来源。
+                self.canvas_view().zoom_at(cursor.x, cursor.y, zoom);
                 // 缩放只需更新 GPU transformation，不需要重建 mesh
             }
         }
@@ -2492,8 +2481,7 @@ impl canvas::Program<Message> for App {
                 if let Some((prev_x, prev_y)) = self.last_mouse_pos.get() {
                     let dx = pos.x as f64 - prev_x;
                     let dy = pos.y as f64 - prev_y;
-                    self.live.transform.offset_x.set(self.live.transform.offset_x.get() + dx as f32);
-                    self.live.transform.offset_y.set(self.live.transform.offset_y.get() + dy as f32);
+                    self.canvas_view().pan_by(dx as f32, dy as f32);
                     self.last_pan_delta.set((dx, dy));
                     self.last_mouse_pos.set(Some((pos.x as f64, pos.y as f64)));
                     return Some(self.paced_redraw());
