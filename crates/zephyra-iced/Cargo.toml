@@ -1,0 +1,18 @@
+[package]
+name = "zephyra-iced"
+version = "0.1.0"
+edition = "2021"
+description = "iced host adapter for the zephyra UI core"
+license = "MIT"
+
+[dependencies]
+# 零依赖核心。刻意只依赖核心、不反向依赖任何宿主渲染栈——
+# 整个迁移缝的可信度建立在这条边界上。
+zephyra = { path = "../../../ZephyraUI/crates/zephyra" }
+# canvas 特性提供 `iced::widget::canvas`，即把 DisplayList 画成几何的那条路。
+iced = { version = "0.14", default-features = false, features = ["canvas", "image-without-codecs", "tokio"] }
+# 直接依赖 iced_graphics 只为一件事：`Frame::draw_image` 被 `iced_graphics/image` 这个
+# cfg gate 住，而 iced → iced_widget → iced_renderer 的 feature 链并不会打开它。
+# 不显式声明的话，本 crate 单独构建时 `draw_image` 不存在，而整仓构建时又恰好存在
+# （被根 crate 的 feature 统一打开）——那种"能编过但换种构建方式就炸"的依赖更糟。
+iced_graphics = { version = "0.14", features = ["image"] }
