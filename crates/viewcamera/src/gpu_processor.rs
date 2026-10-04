@@ -240,13 +240,27 @@ mod tests {
     #[test]
     fn downsampled_rows_are_independent() {
         // 逐行 chunked 写入：验证行内寻址未串行（相邻行起点不同）。
-        let src_w = 300u32;
-        let src_h = 300u32; // 300*300*4 > 2MB → 走降采样分支
+        //
+        // **尺寸必须让 `src_w * src_h * 4` 真的超过 2MB 阈值**，否则走的是
+        // 不降采样的分支，断言 `!= (src_w, src_h)` 会失败。
+        // （原测试用的是 300×300，其注释称 "300*300*4 > 2MB" —— 实为 360KB，
+        //  差了 6 倍，那条注释本身就是错的。）
+        //
+        // 取 2000×500：RGBA = 4.0MB > 2MB 触发降采样；宽高比 4.0 非 16:9，
+        // 故输出为 854×(854/4)=854×213 —— 既走到降采样分支，又让下面的
+        // 逐像素校验只有约 18 万次，debug 下也跑得动。
+        let src_w = 2000u32;
+        let src_h = 500u32;
+        assert!(
+            (src_w * src_h * 4) as usize > 2 * 1024 * 1024,
+            "测试自身的前提失效：输入未达降采样阈值"
+        );
         let rgb: Vec<u8> = (0..src_w * src_h * 3).map(|i| (i % 256) as u8).collect();
         let mut processor = CpuFrameProcessor::new();
         let out = processor.process(&rgb, src_w, src_h);
         let (dw, dh) = (processor.last_width(), processor.last_height());
         assert_ne!((dw, dh), (src_w, src_h), "该尺寸应触发降采样");
+        assert_eq!((dw, dh), (854, 213), "非 16:9 应按宽高比推算输出高度");
         for dy in 0..dh as usize {
             for dx in 0..dw as usize {
                 let s = (processor.sy[dy] as usize * src_w as usize
