@@ -4063,6 +4063,20 @@ name = "viewcore-touch"
 version = "0.1.0"
 
 [[package]]
+name = "viewframe"
+version = "0.1.0"
+dependencies = [
+ "iced",
+ "iced_wgpu",
+ "iced_winit",
+ "log",
+ "viewcamera",
+ "viewgfx",
+ "viewink",
+ "windows-sys 0.59.0",
+]
+
+[[package]]
 name = "viewgfx"
 version = "0.1.0"
 dependencies = [
@@ -4106,6 +4120,7 @@ dependencies = [
  "tokio",
  "viewcamera",
  "viewcore-touch",
+ "viewframe",
  "viewgfx",
  "viewicon",
  "viewink",

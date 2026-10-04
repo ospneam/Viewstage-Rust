@@ -978,7 +978,7 @@ impl App {
 
     /// 渲染节流：**呈现节奏与面板刷新率对齐**。
     ///
-    /// 第一道闸门（无条件）是面板周期，来自 `sys::display`（`EnumDisplaySettings`
+    /// 第一道闸门（无条件）是面板周期，来自 `viewframe::display`（`EnumDisplaySettings`
     /// 实测 60Hz），而不是自测周期——自测周期反映的是"我们自己请求得多快"，
     /// 拿它当面板刷新率会形成循环反馈（满速渲染 → 判定面板很快 → 不节流 →
     /// 继续满速）。详见函数体注释。
@@ -1027,18 +1027,18 @@ impl App {
 
         // 各分支还剩下的目标帧率上限。
         let skip = if self.is_stroke_rendering() {
-            app::pacing::stroke_skip(refresh_hz, app::pacing::STROKE_MIN_HZ)
+            viewframe::stroke_skip(refresh_hz, viewframe::STROKE_MIN_HZ)
         } else if self.is_direct_manipulation() {
             return Action::request_redraw();
         } else {
-            app::pacing::skip_count(refresh_hz, self.config.canvas.annotation_fps_cap)
+            viewframe::skip_count(refresh_hz, self.config.canvas.annotation_fps_cap)
         };
         if skip == 0 {
             return Action::request_redraw();
         }
         // 节流：跳 `skip` 个 vsync。唤醒点取 vsync 区间正中，前后各有
         // period/2 裕度，绝不会因"差一点赶上"而丢帧。
-        let wake_us = app::pacing::throttle_wake_offset_us(refresh_hz, skip);
+        let wake_us = viewframe::throttle_wake_offset_us(refresh_hz, skip);
         let wake_at = self.last_frame_start.get() + Duration::from_micros(wake_us);
         let now = Instant::now();
         if now >= wake_at {
@@ -1081,23 +1081,23 @@ impl App {
     /// 144Hz 面板上跳 1 个 vsync → 实际 72fps → 量化周期 13.9ms。若仍按
     /// 面板的 6.9ms 外推，就只补了一半延迟，笔尖照样落后指针。
     fn effective_frame_period_ms(&self) -> f32 {
-        app::pacing::effective_period_ms(
+        viewframe::effective_period_ms(
             self.measured_refresh_hz(),
             self.is_stroke_rendering(),
-            app::pacing::STROKE_MIN_HZ,
+            viewframe::STROKE_MIN_HZ,
         )
         .unwrap_or(0.0)
     }
 
     /// 实测面板刷新率（Hz）。未测得时返回 0.0（此时不节流）。
     ///
-    /// 数据源是 `app::pacing` 的**呈现**周期估计，由 `iced_winit` 在成功
+    /// 数据源是 `viewframe::pacing` 的**呈现**周期估计，由 `iced_winit` 在成功
     /// `present` 之后回调喂入（`set_present_hook`）。**不能**用 `App::draw` 的
     /// 调用间隔：iced 的 canvas widget 在 layout 阶段就调 `Program::draw`，
     /// 那不是"呈现了一帧"。实测 layout 74/s 而呈现 37.7/s——用错数据源会让
     /// 笔尖外推的量化周期短一半（笔尖落后指针），也会让跳帧档位算错。
     fn measured_refresh_hz(&self) -> f64 {
-        app::pacing::measured_refresh_hz()
+        viewframe::measured_refresh_hz()
     }
 
     /// 摄像头内容上屏 + 帧驱动惯性积分（`canvas::Program::update` 的
@@ -3008,7 +3008,7 @@ impl canvas::Program<Message> for App {
         // 设上限：后者会把真正的管线延迟也一并砍掉。
         let since_input = self.last_input_at.get().elapsed();
         let input_stream_gap = self.last_input_at.get().duration_since(self.last_input_prev_at.get());
-        if input_stream_gap < app::pacing::STREAM_CONTINUITY_GAP
+        if input_stream_gap < viewframe::STREAM_CONTINUITY_GAP
             && since_input < Duration::from_millis(250)
         {
             viewink::stats::add_input_latency(since_input);
@@ -3043,7 +3043,7 @@ impl canvas::Program<Message> for App {
         // iced 的 canvas widget 在 layout 阶段就调 `Program::draw` 来构建几何，
         // 所以 `App::draw` 的调用次数**大于**呈现次数（实测 74/s vs 37.7/s）。
         // 面板刷新周期的估计因此**不能**在这里做——它已经移到
-        // `app::pacing::note_present`，由 `iced_winit` 在成功 `present` 之后
+        // `viewframe::note_present`，由 `iced_winit` 在成功 `present` 之后
         // 喂入。曾经的错法（拿这里的间隔当刷新率）让笔尖外推的量化周期短了
         // 近一半，笔尖因此落后指针。
         let previous_start = self.last_frame_start.replace(frame_started);
@@ -3059,7 +3059,7 @@ impl canvas::Program<Message> for App {
         // 4 倍（67ms），而实测那些"停顿"恰恰是 49~57ms——阈值比要分类的对象
         // 还大，于是 `idle_gap` 恒为 0，空档照样被算进 `long`/`worst`。
         // 一帧的正常节奏是 ~11ms（90fps），1.5 个 vsync 足以区分。
-        let idle_threshold = app::pacing::panel_period()
+        let idle_threshold = viewframe::panel_period()
             .map(|p| p.mul_f64(1.5))
             .unwrap_or(Duration::from_millis(25));
         viewink::stats::note_idle_gap(gap, idle_threshold.as_nanos() as u64);
@@ -3239,7 +3239,7 @@ fn main() {
     // **layout 次数**（iced 的 canvas widget 在 layout 阶段就调 `Program::draw`
     // 构建几何），实测 layout 74/s 而真实呈现 37.7/s。面板周期、跳帧档位、
     // 笔尖外推的量化周期全部依赖这个估计，用错数据源会让笔尖落后指针。
-    iced_winit::frame_pacing::set_present_hook(app::pacing::note_present);
+    iced_winit::frame_pacing::set_present_hook(viewframe::note_present);
 
     // 渲染器启动参数（改动需重启）：
     // - present_mode：透传给 `ICED_PRESENT_MODE`，由

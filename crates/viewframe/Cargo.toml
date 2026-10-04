@@ -1,0 +1,25 @@
+[package]
+name = "viewframe"
+version = "0.1.0"
+edition = "2021"
+description = "Frame driver: vsync pacing, present-period estimation, camera present grid, direct compositing channel setup, and per-frame render accounting"
+authors = ["SECTL"]
+
+[dependencies]
+# 与 viewstage / viewink / viewcamera 锁定同一套 iced/wgpu 版本，避免重复导入边界处类型不匹配
+iced = { version = "0.14", default-features = false, features = ["wgpu", "canvas", "image-without-codecs", "advanced", "tokio", "svg", "crisp", "web-colors"] }
+# 直通合成通道注册（set_frame_clear_color / register_direct_channel）
+iced_wgpu = "0.14"
+# 呈现周期回调注册（frame_pacing::set_present_hook）——「一帧真的上屏了」的唯一权威时刻
+iced_winit = "0.14"
+# 帧计量（stats）与分层渲染共享实时状态（live）
+viewink = { path = "../viewink" }
+# 每帧画布几何编排门面与逐笔画网格缓存条目
+viewgfx = { path = "../viewgfx" }
+# 摄像头帧载荷与直通渲染通道
+viewcamera = { path = "../viewcamera" }
+log = "0.4"
+
+[target.'cfg(windows)'.dependencies]
+# 显示模式查询（EnumDisplaySettingsW）——面板刷新率的无反馈来源
+windows-sys = { version = "0.59", features = ["Win32_Graphics_Gdi"] }

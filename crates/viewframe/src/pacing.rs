@@ -42,9 +42,9 @@ use std::time::{Duration, Instant};
 /// 压到面板刷新率（60Hz 面板实测跑 88~111fps，其中约 43% 的帧必然被显示端
 /// 丢弃），但实测帧率从 ~90~110/s 掉到 ~55~70/s，而本模块文档开头就写明
 /// `request_redraw_at` 的唤醒相位问题会让帧率上不去。收益无法证明、代价
-/// （帧率减半）可测，故不采用。见 [`super::paced_redraw`]。
+/// （帧率减半）可测，故不采用。见 [`crate::FrameDriver::paced_redraw`]。
 pub fn panel_period() -> Option<Duration> {
-    let hz = crate::sys::display::refresh_hz()?;
+    let hz = crate::display::refresh_hz()?;
     (hz > 0.0).then(|| Duration::from_secs_f64(1.0 / hz))
 }
 
