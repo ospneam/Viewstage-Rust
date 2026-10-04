@@ -1,19 +1,29 @@
 #![forbid(unsafe_code)]
 //! # viewicon
 //!
-//! 零依赖的 SVG 图标解析器。只覆盖"图标级" SVG（`viewBox` + 若干 `<path>`），
-//! 不做完整 XML 解析，产出纯数据 [`Icon`]，由渲染端（iced canvas 管线等）消费。
+//! SVG 图标引擎：解析「图标级」SVG（`viewBox` + 若干 `<path>`，不做完整 XML 解析）
+//! 并可选地直接栅格化为 GPU 纹理。产出纯数据 [`Icon`]。
 //!
 //! - [`path::parse_path_data`]：`d` 属性全命令集（`M m L l H h V v C c S s Q q T t A a Z z`），
 //!   含隐式命令重复与全部数字字面格式；椭圆弧按 SVG 规范附录 F.6 从端点参数化
 //!   转为中心参数化，再展开为圆心角 ≤ 90° 的三次贝塞尔段。
 //! - [`svg::parse_svg`]：从 SVG 文本提取 `viewBox` / `fill` / `fill-rule`，
 //!   合并全部 `<path>` 段（跳过 `fill="none"`）。
+//! - [`raster::handle`] / [`raster::element`]：tiny-skia 预栅格化 + 纹理缓存。
+//!   图标是静态内容，所以首次组合时栅格化一次，之后每帧只是 image quad 采样。
 //!
 //! 设计约束：解析一次、渲染端每帧零解析；`Segment` 全部 `Copy`，
 //! 热路径（渲染端逐段遍历）无堆分配。
+//!
+//! ## 分层
+//!
+//! [`Icon`] 与解析器是**纯数据层**（[`path`] / [`svg`]）；[`raster`] 是**渲染层**，
+//! 依赖 tiny-skia 与 iced。应用只提供"用哪些图标"（名字 → SVG 源），渲染由本
+//! crate 负责。
 
+pub mod assets;
 mod path;
+pub mod raster;
 mod svg;
 
 pub use path::{parse_path_data, ParseError};

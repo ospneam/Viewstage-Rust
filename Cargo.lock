@@ -4088,6 +4088,10 @@ dependencies = [
 [[package]]
 name = "viewicon"
 version = "0.1.0"
+dependencies = [
+ "iced",
+ "tiny-skia",
+]
 
 [[package]]
 name = "viewink"

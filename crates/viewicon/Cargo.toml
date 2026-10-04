@@ -2,6 +2,11 @@
 name = "viewicon"
 version = "0.1.0"
 edition = "2021"
-description = "零依赖 SVG 图标解析器：path data 全命令集 + 图标级 SVG 提取 + 弧转三次贝塞尔"
+description = "SVG 图标引擎：受限 path data 全语法子集解析 + 图标定义 SVG 提取 + tiny-skia 预栅格化纹理缓存"
+authors = ["SECTL"]
 
 [dependencies]
+# 栅格化层（raster.rs）需要：解析式抗锯齿覆盖 AA + iced 的 image/canvas 纹理句柄。
+# 与 viewstage / viewink 锁定同一套 iced 版本，避免重复导入边界处类型不匹配。
+tiny-skia = "0.11"
+iced = { version = "0.14", default-features = false, features = ["wgpu", "canvas", "image-without-codecs", "advanced", "tokio", "svg", "crisp", "web-colors"] }
