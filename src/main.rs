@@ -92,109 +92,6 @@ pub enum CameraCommand {
 // 主线程零转换（原 CameraFramePixels/CameraFrameData 转换样板已删除）
 // ==================
 
-// ==================
-// 摄像头显示节拍
-// ==================
-
-/// 摄像头显示节拍（`frame_rate_mode` → 网格周期）。
-///
-/// 与 [`App::start_camera`] 下发给采集线程的 `frame_interval_ms` **必须是同一个
-/// 值**：采集侧按它限速，显示侧按它定网格。两侧各写一份常量迟早会走偏，届时
-/// 采集 30fps 而网格 60Hz（或反过来），表现为"要么丢帧要么重复显示"。
-fn camera_display_period(mode: &str) -> Duration {
-    match mode {
-        "low" => Duration::from_millis(100),
-        "high" => Duration::from_millis(16),
-        _ => Duration::from_millis(33),
-    }
-}
-
-/// 摄像头内容是否走**固定网格**上屏。`VIEWSTAGE_CAMERA_GRID=0` 关闭，退回
-/// "帧到达即上屏"。
-///
-/// 这个开关存在的唯一理由是**同口径 A/B**：修复前后"用户看到的画面更新节奏"
-/// 是在两套不同度量上测的（一次是 present 间隔，一次是内容换上屏间隔），
-/// 跨口径的数字不能比较。有了它，两种行为跑同一个二进制、同一套仪表，
-/// `rstat` 的 `上屏 min/中位/p95/max` 才是可比的。
-fn camera_grid_enabled() -> bool {
-    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ENABLED.get_or_init(|| {
-        std::env::var("VIEWSTAGE_CAMERA_GRID")
-            .map(|v| !matches!(v.trim(), "0" | "false" | "off" | "no"))
-            // **默认关闭。** 同口径 A/B 实测（同一二进制、同一套仪表）：
-            //
-            // ```text
-            // off(到达即上屏)  min=21.8 中位=48.4 p95=63.7 max=76.0ms
-            // on (固定网格)    min=30.0 中位=48.8 p95=63.2 max=72.9ms
-            // ```
-            //
-            // 差异在噪声内——**网格没有带来可测量的改善**。原因很清楚：画面
-            // 内容只在新帧到达时才变，而新帧本身的间隔就由摄像头决定
-            // （实测中位 47.8ms、p95 49.4、max 195.2ms）。网格只能规整"采样
-            // 时刻"，规整不了"源"。
-            //
-            // 所以默认关闭：留一个复杂度换不到可测收益的默认值是错的。真要靠
-            // 缓冲区把抖动源也规整掉，那是 jitter buffer（固定延迟 N 帧、
-            // 到点释放、迟到丢/早到重复），能换均匀但要付固定延迟——那是另一个
-            // 决定，需要先知道摄像头能不能给稳定的帧。
-            .unwrap_or(false)
-    })
-}
-
-/// 摄像头显示节拍的**用户上限**（`frame_rate_mode`）。
-///
-/// 这只是**上限**，不是实际节拍：实际节拍由设备能力决定，见
-/// [`effective_camera_period`]。把上限当节拍用就是"定死"——本机配置写着
-/// `high`（16ms/60fps），设备实测只给 47.6ms（≈21fps），于是显示侧每 33ms
-/// 取一次帧而画面每 47.6ms 才更新一次，观感是隔一帧才动。
-fn camera_mode_period(mode: &str) -> Duration {
-    match mode {
-        "low" => Duration::from_millis(100),
-        "high" => Duration::from_millis(16),
-        _ => Duration::from_millis(33),
-    }
-}
-
-/// 实际使用的节拍 = `max(设备实测周期, 用户上限)`。
-///
-/// - 设备慢于上限 → 以**实测**为准。实测来自 MediaFoundation 的源端时间戳
-///   （`viewcamera::CameraManager::observed_period`），是"画面真的多久变一次"
-///   的唯一可靠依据；设备声称值（`negotiated_fps`）在本机就偏高了 43%。
-/// - 上限慢于设备 → 以上限为准，那是用户主动要的降帧（"低帧率"省电）。
-///
-/// `observed` 为 `None`（样本不足）时退回上限：宁可慢一拍，也不要用三五个
-/// 样本去改节拍。
-fn effective_camera_period(mode: &str, observed: Option<Duration>) -> Duration {
-    let requested = camera_mode_period(mode);
-    match observed {
-        Some(observed) => observed.max(requested),
-        None => requested,
-    }
-}
-
-/// 设备实测投递周期的发布槽（纳秒；0 = 尚无有效样本）。
-///
-/// 采集线程是唯一能看到源端时间戳的地方，主线程只能靠读这个原子拿到结论。
-/// 跨进程/跨线程传一个 `Option<Duration>` 不方便（没有 `MaybeUninit` 的原子
-/// 便利封装），而"纳秒 + 0 表示无"是无损且更快的编码。
-static CAMERA_OBSERVED_PERIOD_NS: std::sync::atomic::AtomicU64 =
-    std::sync::atomic::AtomicU64::new(0);
-
-fn publish_observed_camera_period(period: Option<Duration>) {
-    use std::sync::atomic::Ordering;
-    CAMERA_OBSERVED_PERIOD_NS.store(
-        period.map_or(0, |p| p.as_nanos() as u64),
-        Ordering::Relaxed,
-    );
-}
-
-/// 摄像头实测投递周期（跨线程读采集侧发布的估计）。
-fn observed_camera_period() -> Option<Duration> {
-    use std::sync::atomic::Ordering;
-    let ns = CAMERA_OBSERVED_PERIOD_NS.load(Ordering::Relaxed);
-    (ns > 0).then(|| Duration::from_nanos(ns))
-}
-
 #[derive(Debug, Clone)]
 pub enum CameraEvent {
     Frame(viewcamera::camera::CameraFrameData),
@@ -407,9 +304,14 @@ pub struct App {
     // ---- 图形编排门面（viewgfx）：背景层 dirty-cache、增量镶嵌编排、
     // 触控轨迹双缓冲池、静态快照复用缓冲。持有 live 的权威 Arc ----
     gfx: viewgfx::CanvasGfx,
-    /// 直通合成通道是否已注册（一次性；主窗口 canvas draw 副作用处注册，
-    /// 与同帧 prepare 接管处于同一 redraw 原子段，辅助窗口 renderer 无窗口期）
-    direct_channels_registered: Cell<bool>,
+    // ---- 帧驱动门面（viewframe）：呈现周期估计、vsync 跳帧档位、摄像头上屏
+    // 网格、直通合成通道注册、每帧渲染计量与性能 HUD 采样 ----
+    //
+    // 这些原先是本结构体上的 15 个字段（last_frame_start / last_input_* /
+    // perf_* / camera_pending / camera_grid_next / direct_channels_registered …）。
+    // 它们与「用户点了哪个按钮」共用一个结构体，导致节拍标定只能靠真机看 HUD
+    // 数字来自证。现在决策与其输入输出都在 viewframe crate 内，可单测。
+    frame: viewframe::FrameDriver,
     /// 书写进行中（Down→Up / 按下→释放）。零消息路径（&self）写入 → Cell
     is_drawing: Cell<bool>,
     /// 鼠标左键按下中（含平移）。`Cell`：自有管线的 `handle_pointer_down` /
@@ -422,27 +324,6 @@ pub struct App {
     last_pan_delta: std::cell::Cell<(f64, f64)>,
     /// 惯性（viewcore-touch Momentum）：零消息路径（&self）也要操作 → RefCell
     momentum: std::cell::RefCell<Momentum>,
-    /// 已上屏的摄像头帧。
-    ///
-    /// `RefCell` 而非裸字段：换帧发生在 `canvas::Program::update(&self)` 的
-    /// 帧节拍里（见 [`Self::step_camera_grid`]），那里只有 `&self`。
-    camera_frame: std::cell::RefCell<Option<Arc<viewcamera::camera::CameraFrameData>>>,
-    camera_frame_generation: std::cell::Cell<u64>,
-    /// 采集线程送来的、**尚未上屏**的最新摄像头帧。
-    ///
-    /// 为什么不直接写进 [`Self::camera_frame`]：那样一来帧的**上屏时刻**就等于
-    /// 采集线程的到达时刻，而采集侧的间隔本身不均匀（实测 poll 阻塞
-    /// 20~49ms、最长 197.9ms），于是画面更新也随之一会儿快一会儿慢。
-    ///
-    /// 改成"收到就存、到点才换"：上屏时刻由固定网格决定，格点之间到达的帧
-    /// 互相覆盖，只显示最新的那一个。摄像头是**内容源**，显示才是**节拍**——
-    /// 与浏览器把视频当内容、由合成器按固定节奏取最新帧是同一个模型。
-    camera_pending: std::cell::RefCell<Option<Arc<viewcamera::camera::CameraFrameData>>>,
-    /// 摄像头内容上屏的**绝对网格**（下一个格点）。
-    ///
-    /// 用绝对时刻而非 `now + period`：后者会把每帧的误差累加进去，正是"越跑
-    /// 越偏"的来源。落后时也不追赶（补帧会变成另一种抖动），直接对齐到现在。
-    camera_grid_next: std::cell::Cell<Instant>,
     background_image: Option<Arc<viewcamera::camera::CameraFrameData>>,
     camera_sender: Option<CameraCommandSender>,
     stroke_compute_sender: Option<StrokeTaskSender>,
@@ -478,31 +359,15 @@ pub struct App {
     // 上一帧惯性积分时刻（帧率无关的惯性摩擦）。原由 `FrameTick` 消息更新，
     // 现由 `step_momentum` 在每个渲染帧上更新——与渲染节拍同源，比独立
     // 定时器更准。
+    //
+    // 注意这**不是**渲染帧起点（那个在 `viewframe::FrameMetrics` 里）：这里是
+    // 惯性自己上一次积分的时刻，两者由不同的调用点推进。
     last_frame_tick_time: Cell<Instant>,
-    // 最近一次实际渲染帧起点（批注热路径节流依据 + 惯性 dt 时基，draw 每帧更新）
-    last_frame_start: Cell<Instant>,
-    /// 最近一次输入事件的时刻。用于量"输入→帧起点"延迟（见
-    /// [`viewink::stats::add_input_latency`]）——帧间隔无法区分"事件到了
-    /// 但没画"与"压根没事件"，这个量能。
-    last_input_at: Cell<Instant>,
-    /// 上上一个输入事件的时刻。用来判断输入是否**连续**到达：
-    /// 手指停顿时，第一个事件到下一个事件之间会有很长一段空档，把它算进
-    /// "输入→帧起点"延迟会得到一个由停顿长度决定的假数字（实测 90~143ms，
-    /// 而连续书写时只有一帧 11ms）。只在上一个事件也很近时才采样。
-    last_input_prev_at: Cell<Instant>,
     // OOBE
     pub show_oobe: bool,
     pub oobe_step: usize,
     pub oobe_windows: std::collections::HashSet<iced::window::Id>,
     pub dev_click_count: u8,
-    // 性能监控（perf HUD）
-    perf_frames: Cell<u32>,
-    perf_fps: Cell<f64>,
-    perf_frame_ms: Cell<f64>,
-    perf_last_fps_time: Cell<Instant>,
-    perf_last_frame_start: Cell<Instant>,
-    perf_memory_mb: Cell<f64>,
-    perf_last_mem_time: Cell<Instant>,
     }
 
 impl Default for App {
@@ -537,20 +402,15 @@ impl Default for App {
             camera_rotation: config.source.default_rotation,
             live,
             gfx,
-            direct_channels_registered: Cell::new(false),
+            frame: viewframe::FrameDriver::new(),
             config,
             is_drawing: Cell::new(false),
             mouse_left_pressed: Cell::new(false),
             last_mouse_pos: std::cell::Cell::new(None),
             last_pan_delta: std::cell::Cell::new((0.0, 0.0)),
             momentum: std::cell::RefCell::new(Momentum::new()),
-            camera_frame: std::cell::RefCell::new(None),
-            camera_frame_generation: std::cell::Cell::new(0),
-            // 立即到期：首帧应当在第一个重绘就上屏，不要先等一个网格周期。
-            camera_pending: std::cell::RefCell::new(None),
-            camera_grid_next: std::cell::Cell::new(Instant::now()),
             background_image: None,
-                    camera_sender: None,
+            camera_sender: None,
             stroke_compute_sender: None,
             next_stroke_id: std::cell::Cell::new(0),
             stroke_mesh_cache: RefCell::new(std::collections::HashMap::new()),
@@ -572,20 +432,10 @@ impl Default for App {
             trail_color_rgb: Cell::new((1.0, 1.0, 1.0)),
             config_dirty: Cell::new(false),
             last_frame_tick_time: Cell::new(Instant::now()),
-            last_frame_start: Cell::new(Instant::now()),
-            last_input_at: Cell::new(Instant::now()),
-            last_input_prev_at: Cell::new(Instant::now()),
             show_oobe,
             oobe_step: 0,
             oobe_windows: std::collections::HashSet::new(),
             dev_click_count: 0,
-            perf_frames: Cell::new(0),
-            perf_fps: Cell::new(0.0),
-            perf_frame_ms: Cell::new(0.0),
-            perf_last_fps_time: Cell::new(Instant::now()),
-            perf_last_frame_start: Cell::new(Instant::now()),
-            perf_memory_mb: Cell::new(0.0),
-            perf_last_mem_time: Cell::new(Instant::now() - Duration::from_secs(2)),
         }
     }
 }
@@ -639,7 +489,7 @@ impl App {
 
     fn start_camera(&mut self) {
         let frame_interval_ms =
-            camera_display_period(&self.config.canvas.frame_rate_mode).as_millis() as u64;
+            viewframe::grid::display_period(&self.config.canvas.frame_rate_mode).as_millis() as u64;
         self.send_camera_command(CameraCommand::Start {
             index: self.config.source.camera_index,
             width: self.config.source.camera_width,
@@ -905,7 +755,7 @@ impl App {
         }
         self.current_image_index = Some(index);
         self.showing_image = true;
-        *self.camera_frame.borrow_mut() = None;
+        self.frame.camera().clear();
         // 图片身份 = Arc 指针（列表全程持有该 Arc，指针稳定无 ABA）
         let generation = Arc::as_ptr(&rgba) as usize as u64;
         self.background_image = Some(Arc::new(viewcamera::camera::CameraFrameData {
@@ -976,76 +826,22 @@ impl App {
         }));
     }
 
-    /// 渲染节流：**呈现节奏与面板刷新率对齐**。
+
+    /// 渲染节流：把重绘请求翻译成 iced 的 `Action`。
     ///
-    /// 第一道闸门（无条件）是面板周期，来自 `viewframe::display`（`EnumDisplaySettings`
-    /// 实测 60Hz），而不是自测周期——自测周期反映的是"我们自己请求得多快"，
-    /// 拿它当面板刷新率会形成循环反馈（满速渲染 → 判定面板很快 → 不节流 →
-    /// 继续满速）。详见函数体注释。
-    ///
-    /// 闸门放行之后还有分支级的目标上限（书写期 `STROKE_MIN_HZ`、普通批注的
-    /// `annotation_fps_cap`），用跳帧档位实现。
-    ///
-    /// **更正**：旧文档称"直接操作时 vsync 本身就是节流器，额外机制只会添乱"。
-    /// 在当前 Vulkan 后端这不成立——实测 `AutoVsync` 并未把帧率钉到 60Hz
-    /// （60Hz 面板上跑到 74fps），所以 vsync 在这里**没有**充当节流器，限幅必须
-    /// 由我们自己做。
+    /// 决策本身在 [`viewframe::FrameDriver::paced_redraw`]——为什么是"跳 vsync"
+    /// 而不是"定时器"、以及那道被删掉的「面板对齐闸门」为什么拦掉了 100% 的输入
+    /// 重绘，都记在那里。这里的职责只有一件：把框架无关的 [`viewframe::Redraw`]
+    /// 映射成本应用的 `Message` 类型。
     fn paced_redraw(&self) -> Action<Message> {
-        let refresh_hz = self.measured_refresh_hz();
-        viewink::stats::set_redraw_source(viewink::stats::RedrawSource::Input);
-
-        // ---- 这里曾经有一道"面板对齐闸门"，已删除 ----
-        //
-        // 它对任何距上次 `App::draw` 不足一个面板周期的重绘请求返回
-        // `request_redraw_at(last + period)`。**实测它拦掉了 100% 的输入重绘**：
-        //
-        // ```text
-        // throttled=12  src=26/12/0/1    ← 输入触发 12 次，延后 12 次
-        // throttled=5   src=30/6/0/1     ← 输入 6 次，延后 5 次
-        // throttled=2   src=31/2/0/1     ← 输入 2 次，延后 2 次
-        // ```
-        //
-        // 也就是说每一个笔尖事件都被硬加最多 16.7ms 延迟——正是"跟不上手"。
-        //
-        // 它当初的理由是"本机稳定跑到 70~100fps，每秒 10~40 帧必然被显示端
-        // 丢掉"。**那个数字是错的**：它数的是 `App::draw` 的调用次数，而 iced 的
-        // canvas widget 在 **layout 阶段**就调 `Program::draw` 构建几何，不是每次
-        // 呈现才调一次。在唯一呈现计数点（`iced_winit` 成功 `present` 之后）重新
-        // 测量，真实呈现速率是：
-        //
-        // ```text
-        // 呈现/秒  min=25.3  中位=37.7  max=57.6     （60Hz 面板，从不超 60）
-        // layout/秒 中位=74
-        // ```
-        //
-        // **呈现从来没有超过面板刷新率**，所以这道闸门拦的是一个不存在的浪费，
-        // 代价却是全部输入的延迟。
-        //
-        // 那 2.5 倍的 layout/呈现差值仍然存在（74 vs 38），但它不是"多画的帧"，
-        // 而是同一帧内的重复重建——要省它得改"提交时机"，不是加闸门。相关闸门
-        // 见 `iced_winit::frame_pacing`（默认关闭）。
-
-        // 各分支还剩下的目标帧率上限。
-        let skip = if self.is_stroke_rendering() {
-            viewframe::stroke_skip(refresh_hz, viewframe::STROKE_MIN_HZ)
-        } else if self.is_direct_manipulation() {
-            return Action::request_redraw();
-        } else {
-            viewframe::skip_count(refresh_hz, self.config.canvas.annotation_fps_cap)
-        };
-        if skip == 0 {
-            return Action::request_redraw();
+        match self.frame.paced_redraw(viewframe::RedrawInputs {
+            stroke_rendering: self.is_stroke_rendering(),
+            direct_manipulation: self.is_direct_manipulation(),
+            annotation_fps_cap: self.config.canvas.annotation_fps_cap,
+        }) {
+            viewframe::Redraw::Now => Action::request_redraw(),
+            viewframe::Redraw::At(at) => Action::request_redraw_at(at),
         }
-        // 节流：跳 `skip` 个 vsync。唤醒点取 vsync 区间正中，前后各有
-        // period/2 裕度，绝不会因"差一点赶上"而丢帧。
-        let wake_us = viewframe::throttle_wake_offset_us(refresh_hz, skip);
-        let wake_at = self.last_frame_start.get() + Duration::from_micros(wake_us);
-        let now = Instant::now();
-        if now >= wake_at {
-            return Action::request_redraw();
-        }
-        viewink::stats::add_throttled_frame();
-        Action::request_redraw_at(wake_at)
     }
 
     /// 是否处于"直接操作"中：这些场合一律满 vsync，不受帧率上限约束。
@@ -1077,105 +873,25 @@ impl App {
 
     /// 当前**有效**的帧量化周期（毫秒）：帧内容实际上屏的间隔。
     ///
-    /// 这是笔尖外推的预测时域，必须反映**节流后的**节奏而不是面板刷新率：
-    /// 144Hz 面板上跳 1 个 vsync → 实际 72fps → 量化周期 13.9ms。若仍按
-    /// 面板的 6.9ms 外推，就只补了一半延迟，笔尖照样落后指针。
+    /// 笔尖外推的预测时域。决策在
+    /// [`viewframe::FrameDriver::effective_frame_period_ms`]：必须反映**节流后**
+    /// 的节奏而不是面板刷新率——144Hz 面板上跳 1 个 vsync → 实际 72fps →
+    /// 量化周期 13.9ms。若仍按面板的 6.9ms 外推，就只补了一半延迟，笔尖照样
+    /// 落后指针。
     fn effective_frame_period_ms(&self) -> f32 {
-        viewframe::effective_period_ms(
-            self.measured_refresh_hz(),
-            self.is_stroke_rendering(),
-            viewframe::STROKE_MIN_HZ,
-        )
-        .unwrap_or(0.0)
+        self.frame
+            .effective_frame_period_ms(self.is_stroke_rendering())
     }
 
-    /// 实测面板刷新率（Hz）。未测得时返回 0.0（此时不节流）。
+    /// 摄像头内容上屏（`canvas::Program::update` 的 `RedrawRequested` 分支）。
     ///
-    /// 数据源是 `viewframe::pacing` 的**呈现**周期估计，由 `iced_winit` 在成功
-    /// `present` 之后回调喂入（`set_present_hook`）。**不能**用 `App::draw` 的
-    /// 调用间隔：iced 的 canvas widget 在 layout 阶段就调 `Program::draw`，
-    /// 那不是"呈现了一帧"。实测 layout 74/s 而呈现 37.7/s——用错数据源会让
-    /// 笔尖外推的量化周期短一半（笔尖落后指针），也会让跳帧档位算错。
-    fn measured_refresh_hz(&self) -> f64 {
-        viewframe::measured_refresh_hz()
-    }
-
-    /// 摄像头内容上屏 + 帧驱动惯性积分（`canvas::Program::update` 的
-    /// `RedrawRequested` 分支）。
-    ///
-    /// 作用：把**摄像头内容的上屏时刻**钉在一个绝对网格上。
-    ///
-    /// # 为什么要网格，而不是"收到就显示"
-    ///
-    /// 采集侧的间隔本身不均匀——`poll_live_frame` 会阻塞等 MediaFoundation 的
-    /// 下一个样本，实测间隔 `min 20~31ms 中位 48ms p95 49.6ms max 197.9ms`。
-    /// 若让"帧到达"直接决定"上屏"，画面更新就会原样继承这份抖动。修复前实测
-    /// 上屏间隔：
-    ///
-    /// ```text
-    /// n=324  min 12.4  p10 16.0  中位 20.3  p90 33.6  max 41.1 ms
-    /// 落在 33.3ms ±25% 内：只有 25%
-    /// ```
-    ///
-    /// 中位 20.3ms（应为 33.3ms）、尾部到 41ms——这就是"一会更新快一会慢"。
-    ///
-    /// # 网格怎么保证均匀
-    ///
-    /// - **绝对时刻推进**：`grid_next += period`，误差不累积；落后时对齐到
-    ///   `now` 而不追赶（补帧会变成另一种抖动）。
-    /// - **到点才换内容**：格点之间的到达帧在 `camera_pending` 里互相覆盖，
-    ///   显示的始终是最新一帧。中间被覆盖的帧只是"没显示过"，不是"迟到的
-    ///   旧画面"——后者才是可见的卡顿。
-    /// - **自转靠 `request_redraw_at`**：每次检查后都排下一个格点，因此不需要
-    ///   摄像头消息本身来驱动（iced 在每条消息后无条件重绘，那是即时的、抖的）。
-    ///
-    /// # 代价
-    ///
-    /// 上屏延迟从"随抖动 0~48ms"变成"确定 ≤1 个摄像头周期（33.3ms）"。对文档
-    /// 摄像头预览，**均匀比最新更重要**——不均匀的刷新本身就是可见的缺陷。
+    /// 把**摄像头内容的上屏时刻**钉在一个绝对网格上。网格的动机、均匀性保证
+    /// 与延迟代价都记在 [`viewframe::CameraGrid`]——这里只负责把「下一个格点
+    /// 时刻」翻译成本应用的 `Action`。
     fn step_camera_grid(&self) -> Option<Action<Message>> {
-        // 关闭网格：帧到达即上屏（旧行为，作为 A/B 基准）。
-        if !camera_grid_enabled() {
-            if let Some(frame) = self.camera_pending.borrow_mut().take() {
-                *self.camera_frame.borrow_mut() = Some(frame);
-                viewink::stats::note_camera_swap(Instant::now());
-            }
-            return None;
-        }
-        // 冻结时不换内容（拍照后相机线程已停推帧）。
-        let mut swapped = false;
-        if !self.frozen {
-            let now = Instant::now();
-            if now >= self.camera_grid_next.get() {
-                let pending = self.camera_pending.borrow_mut().take();
-                if let Some(frame) = pending {
-                    // 不在此处改 generation：它在入槽位时已盖好（见
-                    // `CameraEvent::Frame`）。此处若再自增，上传侧会拿到一个
-                    // 与槽位里不一致的序号，反而多触发一次无意义的重传。
-                    *self.camera_frame.borrow_mut() = Some(frame);
-                    swapped = true;
-                    viewink::stats::note_camera_swap(Instant::now());
-                }
-                let period = camera_display_period(&self.config.canvas.frame_rate_mode);
-                // 绝对推进；已落后则重新对齐，绝不"追赶"补帧。
-                let next = self.camera_grid_next.get() + period;
-                self.camera_grid_next
-                    .set(if next > now { next } else { now + period });
-            }
-        }
-        // 排下一个格点，让网格自转。相机停摆且无待上屏帧时不排——否则会留下
-        // 一条永不停歇的 30Hz 重绘链，纯空转。
-        let grid_next = self.camera_grid_next.get();
-        let keep_alive = !self.frozen
-            && (swapped || self.camera_pending.borrow().is_some());
-        if keep_alive {
-            return Some(Action::request_redraw_at(grid_next));
-        }
-        // 没有内容可换：把网格对齐到现在，让下一次真实事件能立刻显示。
-        if !self.frozen {
-            self.camera_grid_next.set(Instant::now());
-        }
-        None
+        self.frame
+            .step_camera_grid(self.frozen, &self.config.canvas.frame_rate_mode)
+            .map(Action::request_redraw_at)
     }
 
     /// 惯性积分 + 续帧请求。**由重绘帧自身驱动**（见
@@ -1270,15 +986,10 @@ impl App {
     /// 收笔走 [`Message::CanvasReleased`]：finalize 需要 `&mut self`，而
     /// `canvas::Program::update` 只有 `&self`，复用现成消息即可，不必再造一条
     /// 延迟通道。
-    /// 记录一次输入事件，并把"上一个输入事件"推到 `last_input_prev_at`。
-///
-/// 两个时刻都要留：`last_input_at` 量"事件→下一帧"，`last_input_prev_at` 量
-/// "事件与事件之间的间隔"，后者用来判断这串输入是否**连续**（见 `App::draw`
-/// 里的采样条件）。
-fn mark_input(&self) {
-    let now = Instant::now();
-    self.last_input_prev_at.set(self.last_input_at.replace(now));
-}
+    /// 记录一次输入事件（供"输入→帧起点"延迟计量）。
+    fn mark_input(&self) {
+        self.frame.metrics().mark_input();
+    }
 
 fn on_touch(&self, touch: &iced::touch::Event, position: Point) -> Option<Action<Message>> {
         viewink::stats::add_touch_event();
@@ -1356,27 +1067,23 @@ fn on_touch(&self, touch: &iced::touch::Event, position: Point) -> Option<Action
             }
             Message::CameraEvent(event) => {
                 match event {
-                    CameraEvent::Frame(mut frame) => {
+                    CameraEvent::Frame(frame) => {
                         // `frozen` 在拍照后置位（相机线程同时转入冻结，不再推帧）；
                         // 这里兜底丢弃已经在途的迟到帧，避免一次无谓的纹理上传
                         // 与全帧重绘驱动。
                         viewink::stats::note_camera_frame(frame.width, frame.height);
                         if !self.frozen {
-                            // **generation 必须在这里盖上**：上传侧
-                            // （`viewgfx::update_camera_params`）只靠它判断"有没有新
-                            // 帧"。曾经在旧代码里也是这一行；把它随重构删掉后，
+                            // **只入待上屏槽位，不直接上屏。** 帧序号（generation）
+                            // 必须在这里盖上：上传侧（`viewgfx::update_camera_params`）
+                            // 只靠它判断"有没有新帧"。曾经在重构时把它删掉过，结果
                             // 所有帧都带 0，`update_camera_params` 认为内容没变，
                             // 于是**一次都不上传**（实测 `up=0B/s`，画面全黑）。
-                            frame.generation = self.camera_frame_generation.get() + 1;
-                            self.camera_frame_generation
-                                .set(frame.generation);
-                            // **只入待上屏槽位，不直接上屏。**
                             //
                             // 帧载荷已是 viewcamera 类型（Arc 包装在采集线程完成），
                             // 主线程仅盖一个序号——零像素转换、零再包装。上屏由
-                            // `step_camera_grid` 的固定网格决定（见 `camera_pending`
-                            // 的文档）。
-                            *self.camera_pending.borrow_mut() = Some(Arc::new(frame));
+                            // `step_camera_grid` 的固定网格决定（见
+                            // `viewframe::CameraGrid::submit` 的文档）。
+                            self.frame.camera().submit(frame);
                         }
                     }
                     CameraEvent::Captured(frame) => {
@@ -1395,13 +1102,16 @@ fn on_touch(&self, touch: &iced::touch::Event, position: Point) -> Option<Action
                         self.active_tool = ToolButton::Comment;
                         self.sidebar_visible = true;
 
-                        self.camera_frame_generation.set(self.camera_frame_generation.get() + 1);
-                        *self.camera_frame.borrow_mut() = Some(Arc::new(viewcamera::camera::CameraFrameData {
-                            pixels: viewcamera::camera::FramePixels::Rgba(Arc::clone(&rgba_arc)),
-                            width: w,
-                            height: h,
-                            generation: self.camera_frame_generation.get(),
-                        }));
+                        // 拍照帧**立即**上屏，不走上屏网格——画面已冻结，用户在等结果。
+                        // 帧序号由 CameraGrid 分配（与槽位内容同代写入）。
+                        self.frame.camera().freeze_with(
+                            viewcamera::camera::CameraFrameData {
+                                pixels: viewcamera::camera::FramePixels::Rgba(Arc::clone(&rgba_arc)),
+                                width: w,
+                                height: h,
+                                generation: 0,
+                            },
+                        );
 
                         // PNG 编码+写盘移到后台线程（消除主线程多毫秒卡顿）；
                         // 文件名主线程预生成，列表立即更新不等磁盘写入
@@ -1959,39 +1669,10 @@ fn on_touch(&self, touch: &iced::touch::Event, position: Point) -> Option<Action
     /// 永远不会误抢）。注册与同帧 prepare 的接管发生在同一窗口 redraw
     /// 原子段内，其他窗口的 renderer 无插入接管的窗口期。
     ///
-    /// 注册顺序 = 合成顺序：白板底色在底、摄像头背景在其上、批注笔迹
-    /// 再上、iced UI 层与文字最上（与旧架构 z 序一致）。
+    /// 注册内容与顺序（白板底色 → 摄像头背景 → 批注笔迹）记在
+    /// [`viewframe::channels`]。幂等由 `Channels` 自身保证。
     fn register_direct_channels_once(&self) {
-        if self.direct_channels_registered.get() {
-            return;
-        }
-        self.direct_channels_registered.set(true);
-
-        // 白板底色：取代旧版最外层 container 的不透明背景 quad。那块
-        // quad 位于 iced Scene 中，绘制在直通通道之上，会把摄像头/批注
-        // 整层盖住（重构后首版"画面全无"的根因）。
-        //
-        // 底色不是通道——它不画任何东西，只是声明直通 pass 的
-        // `LoadOp::Clear`。早先建模成一个 45 行全空实现的 `DirectChannel`，
-        // 每帧要多一次堆分配对象 + 两次虚调用 + render 里一次 find_map。
-        iced_wgpu::set_frame_clear_color([
-            26.0 / 255.0,
-            26.0 / 255.0,
-            26.0 / 255.0,
-            1.0,
-        ]);
-        log::info!("[direct] frame clear color set");
-
-        if !diag_no_camera() {
-            iced_wgpu::register_direct_channel(Box::new(
-                viewcamera::camera::CameraChannel::new(self.gfx.camera_params_handle()),
-            ));
-            log::info!("[direct] camera channel registered");
-        }
-        iced_wgpu::register_direct_channel(Box::new(
-            viewink::annotation::AnnotationLayer::new(Arc::clone(&self.gfx.live)),
-        ));
-        log::info!("[direct] annotation channel registered");
+        self.frame.channels().ensure_registered(&self.gfx);
     }
 
     fn view(&self) -> Element<'_, Message> {
@@ -2006,9 +1687,9 @@ fn on_touch(&self, touch: &iced::touch::Event, position: Point) -> Option<Action
         // 提交参数快照（viewgfx dirty-cache：滤镜/帧未变时零重建）到共享槽，
         // 摄像头通道 prepare 阶段取走上传，合成序列直接画进 frame。
         // 诊断开关：VIEWSTAGE_NO_CAMERA=1 时跳过该层（分层定位 GPU 占用）。
-        if !diag_no_camera() {
+        if !viewframe::channels::diag_no_camera() {
             self.gfx.update_camera_params(viewgfx::BackgroundInputs {
-                camera_frame: self.camera_frame.borrow().as_ref(),
+                camera_frame: self.frame.camera().current().as_ref(),
                 background_image: self.background_image.as_ref(),
                 brightness: self.camera_brightness,
                 contrast: self.camera_contrast,
@@ -2233,9 +1914,12 @@ fn on_touch(&self, touch: &iced::touch::Event, position: Point) -> Option<Action
 
         // 性能 HUD（开发者模式）：左上角显示 FPS/帧时间/内存/笔擦网格数量
         if self.config.developer.perf_monitor_enabled {
-            let fps = self.perf_fps.get();
-            let frame_ms = self.perf_frame_ms.get();
-            let mem = self.perf_memory_mb.get();
+            // 采样在 `viewframe::FrameMetrics::sample_perf`（draw 路径，每帧），
+            // 这里只读最近一次的窗口结果。
+            let perf = self.frame.metrics().perf();
+            let fps = perf.fps;
+            let frame_ms = perf.frame_ms;
+            let mem = perf.memory_mb;
             let stroke_count = self.strokes.len();
             let eraser_count = self.erasers.len();
             let mesh_count = self.stroke_mesh_cache.borrow().len();
@@ -2375,15 +2059,9 @@ impl iced::Program for ViewStageApp {
     }
 
     fn settings(&self) -> iced::Settings {
-        iced::Settings {
-            // 关闭 UI 三角形 MSAA（iced 默认 true → MSAA 4x）：全部 UI 几何
-            // 每帧 4 倍采样 + resolve 读回，在核显/教育大屏 GPU 上是确定的
-            // 每帧填充带宽大头。白板批注层走自有 SDF 抗锯齿管线不受影响，
-            // 文字走 glyph atlas 采样也不受影响；仅大色块三角形边缘可能有
-            // 轻微差异（圆角/边框在 quad shader 内做 SDF，不依赖 MSAA）。
-            antialiasing: false,
-            ..iced::Settings::default()
-        }
+        // MSAA 关闭的理由（每帧 4 倍采样 + resolve 读回是大屏核显的填充带宽大头）
+        // 记在 viewframe::boot::settings。
+        viewframe::boot::settings()
     }
 
     fn window(&self) -> Option<iced::window::Settings> {
@@ -2630,7 +2308,7 @@ fn camera_worker() -> impl iced::futures::Stream<Item = Message> {
                 camera: None,
                 should_freeze: false,
                 do_capture: false,
-                requested_frame_interval: camera_mode_period("normal"),
+                requested_frame_interval: viewframe::grid::mode_period("normal"),
             };
             let mut cpu_processor = viewcamera::gpu_processor::CpuFrameProcessor::new();
             // 采集节拍的绝对基准。见下面 `next_capture_at` 处的说明。
@@ -2705,7 +2383,7 @@ fn camera_worker() -> impl iced::futures::Stream<Item = Message> {
                             // 空转 poll。实测值同时喂给显示侧（网格），两边
                             // 用同一个数，不会出现"采集 47.6ms、显示 33ms"这种
                             // 隔帧不同步。
-                            publish_observed_camera_period(cam.observed_period());
+                            viewframe::grid::publish_observed_period(cam.observed_period());
                             // 打印实测值本身，别靠推断——之前就是靠"轮次间隔
                             // ≈ 源端间隔"倒推，两者其实不等（poll 常在 1ms 内
                             // 返回排队样本），推断出的结论是错的。
@@ -2992,27 +2670,13 @@ impl canvas::Program<Message> for App {
         bounds: Rectangle,
         _cursor: mouse::Cursor,
     ) -> Vec<Geometry> {
-        // 帧起点：取本函数**第一行**的时刻，后续两处计量都以此为基准——
-        // ① 相邻两帧起点之差 = 实测刷新周期；② 本帧属主 CPU 工作耗时。
-        let frame_started = Instant::now();
-        // 记账本帧的重绘来源：闸门装在输入路径上，但重绘还有别的来源（摄像头
-        // 消息导致的 view 变化、窗口事件、iced/winit 内部）。不分类就无法判断
-        // "超出的帧"到底来自哪里。
-        viewink::stats::note_frame_source();
-        // 输入→帧起点延迟：上一次输入事件到本帧入口的间隔。
+        // ---- 帧驱动：全部计量与状态推进都委托给 viewframe::FrameMetrics ----
         //
-        // **只在输入连续时采样。** 手指停顿后落笔，第一个事件距上一个事件已经
-        // 隔了整段停顿，此时量到的"延迟"其实是停顿长度而不是管线延迟——实测
-        // 未过滤时是 90~143ms，而连续书写下只有一帧（~11ms）。判据用
-        // "上一个事件也很近"（`input_stream_gap`），而不是给 `since_input`
-        // 设上限：后者会把真正的管线延迟也一并砍掉。
-        let since_input = self.last_input_at.get().elapsed();
-        let input_stream_gap = self.last_input_at.get().duration_since(self.last_input_prev_at.get());
-        if input_stream_gap < viewframe::STREAM_CONTINUITY_GAP
-            && since_input < Duration::from_millis(250)
-        {
-            viewink::stats::add_input_latency(since_input);
-        }
+        // 起点取本函数**第一行**的时刻（`begin_frame` 内部第一件事就是取时钟），
+        // 后续三处计量都以它为基准：① 相邻两帧起点之差 = layout 间隔；② 本帧属主
+        // CPU 工作耗时；③ 输入→帧起点延迟。
+        let metrics = self.frame.metrics();
+        let frame_started = metrics.begin_frame();
 
         // 直通合成通道注册（一次性；主窗口专属副作用，见方法文档）
         self.register_direct_channels_once();
@@ -3038,79 +2702,27 @@ impl canvas::Program<Message> for App {
         // 每帧一次则恒为 O(新增点数)，且用的必然是最新点。
         self.gfx.refresh_live_geometry();
 
-        // 这里的间隔是 **layout 间隔**，不是呈现间隔。
-        //
-        // iced 的 canvas widget 在 layout 阶段就调 `Program::draw` 来构建几何，
-        // 所以 `App::draw` 的调用次数**大于**呈现次数（实测 74/s vs 37.7/s）。
-        // 面板刷新周期的估计因此**不能**在这里做——它已经移到
-        // `viewframe::note_present`，由 `iced_winit` 在成功 `present` 之后
-        // 喂入。曾经的错法（拿这里的间隔当刷新率）让笔尖外推的量化周期短了
-        // 近一半，笔尖因此落后指针。
-        let previous_start = self.last_frame_start.replace(frame_started);
-        let gap = frame_started.duration_since(previous_start);
-        // 仅作诊断：`rstat` 里的 `frames=` 是 **layout 次数**，不是帧率。
-        // 真实呈现速率看 `[frame_pacing] 呈现=N`。
-        viewink::stats::note_frame_interval(gap);
-        // 但帧间隔里混着"没人请求重绘、我们等输入"的空档。把它单列出来，
-        // 否则空闲会被读成长帧停顿（实测误报 `long=9 worst=53ms`，实为 9 段
-        // 无输入的安静期）。
-        //
-        // 阈值取面板刷新周期的 1.5 倍（60Hz 上 25ms），**不是** 4 倍：第一版用
-        // 4 倍（67ms），而实测那些"停顿"恰恰是 49~57ms——阈值比要分类的对象
-        // 还大，于是 `idle_gap` 恒为 0，空档照样被算进 `long`/`worst`。
-        // 一帧的正常节奏是 ~11ms（90fps），1.5 个 vsync 足以区分。
-        let idle_threshold = viewframe::panel_period()
-            .map(|p| p.mul_f64(1.5))
-            .unwrap_or(Duration::from_millis(25));
-        viewink::stats::note_idle_gap(gap, idle_threshold.as_nanos() as u64);
-        // 帧计数与 1 秒窗口报表。`end_frame` 原本只在批注通道 prepare 里调，
-        // 而直通模式下报表不出现（几轮排查都被这个坑过）。放在这里才是与
-        // 真实呈现帧一一对应的位置。
-        viewink::stats::end_frame();
+        // 帧间隔分类 + 1 秒窗口报表（layout 间隔 ≠ 呈现间隔，见 end_frame 文档）
+        metrics.end_frame(frame_started);
+
         // 笔尖外推的预测时域 = **有效**帧量化周期（已含书写期的 60fps 节流），
         // 不是面板刷新率——否则 144Hz 面板跳帧后会欠补一半延迟。
         self.live
             .frame_period_ms
             .set(self.effective_frame_period_ms());
 
-        // 性能 HUD：渲染帧率/帧时间/内存采样（仅在启用时统计，开销极小）
-        if self.config.developer.perf_monitor_enabled {
-            let now = Instant::now();
-            let last_start = self.perf_last_frame_start.replace(now);
-            let elapsed = now.duration_since(last_start).as_secs_f64();
-            let frames = self.perf_frames.get() + 1;
-            self.perf_frames.set(frames);
-            let since_fps = now
-                .duration_since(self.perf_last_fps_time.get())
-                .as_secs_f64();
-            if since_fps >= 0.5 {
-                self.perf_fps.set(frames as f64 / since_fps);
-                // 帧耗时显示与 FPS 同窗口降频（0.5s）：数字每帧变化会触发
-                // 文字重新 shape/栅格化与 glyph atlas 更新——书写热路径上的
-                // 持续 CPU/GPU 开销，与观测价值不成比例
-                self.perf_frame_ms.set(elapsed * 1000.0);
-                self.perf_frames.set(0);
-                self.perf_last_fps_time.set(now);
-            }
-            if now
-                .duration_since(self.perf_last_mem_time.get())
-                .as_secs_f64()
-                >= 1.0
-            {
-                self.perf_memory_mb
-                    .set(crate::sys::memory::get_memory_usage_mb());
-                self.perf_last_mem_time.set(now);
-            }
-        }
+        // 性能 HUD 采样（仅在启用时统计）。内存查询作为闭包传入——两道闸门
+        // （FPS 0.5s / 内存 1s）都没放行时它一次也不会被调用，且平台相关的
+        // 内存 API 留在应用侧（`sys::memory` 是平台工具，不属于渲染层）。
+        metrics.sample_perf(self.config.developer.perf_monitor_enabled, || {
+            crate::sys::memory::get_memory_usage_mb()
+        });
 
         // 渲染已迁移到独立批注管线（viewink::annotation），事件层仅捕获输入。
         // 帧预算计量：本函数内属宿主自身的 CPU 工作（镶嵌 + 记账）。与
         // `stats::note_prepare_work`（批注层打包上传 + 剔除）相加才是宿主
         // 在一帧内可控的全部开销——逼近刷新周期即意味着要丢帧。
-        viewink::stats::note_frame_work(frame_started.elapsed());
-        // `draw` 函数体自身的耗时——回答"我们的代码慢不慢"的唯一量。
-        // 帧间隔（含等待输入）回答不了，它一直是本项目最大的误读来源。
-        viewink::stats::add_draw_cost(frame_started.elapsed());
+        metrics.note_frame_work(frame_started);
         vec![]
     }
 }
@@ -3175,13 +2787,8 @@ fn load_image_from_rgba(rgba: Vec<u8>, width: u32, height: u32) -> ImageEntry {
     }
 }
 
-/// 分层诊断开关：VIEWSTAGE_NO_CAMERA=1 时跳过相机/图片背景层渲染。
-/// 用于在真机上定位 GPU 占用的层构成（基线 → 逐层排除），环境变量
-/// 一次性读取并缓存。
-fn diag_no_camera() -> bool {
-    static NO_CAMERA: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *NO_CAMERA.get_or_init(|| std::env::var("VIEWSTAGE_NO_CAMERA").is_ok_and(|v| v != "0"))
-}
+/// 分层诊断开关已迁至 `viewframe::channels::diag_no_camera`（与它所控制的通道
+/// 注册放在一起——环境变量的语义就是"跳过这些通道"）。
 
 /// 提升 Windows 计时器精度到 1ms。返回是否成功（供退出时配对还原）。
 ///
@@ -3233,50 +2840,18 @@ fn restore_timer_resolution(enabled: bool) {
 }
 
 fn main() {
-    // 节拍基准注册：让 `iced_winit` 在每次**成功呈现**之后回调本进程。
-    //
-    // 必须是这里、且必须是"呈现"而不是别的时刻：`App::draw` 的调用次数是
-    // **layout 次数**（iced 的 canvas widget 在 layout 阶段就调 `Program::draw`
-    // 构建几何），实测 layout 74/s 而真实呈现 37.7/s。面板周期、跳帧档位、
-    // 笔尖外推的量化周期全部依赖这个估计，用错数据源会让笔尖落后指针。
-    iced_winit::frame_pacing::set_present_hook(viewframe::note_present);
-
-    // 渲染器启动参数（改动需重启）：
-    // - present_mode：透传给 `ICED_PRESENT_MODE`，由
-    //   `iced_wgpu::settings::present_mode_from_env` 解析成 wgpu PresentMode。
-    //   原实现只认 `"mailbox"` 一个值、其余静默退回 AutoVsync——设了不生效的
-    //   典型写法。现在按白名单透传，取值与该函数保持一致。
-    // - prefer_integrated_gpu：WGPU_POWER_PREF=low，双显卡机器锁定核显避免唤醒独显
+    // 渲染器启动配置（改动需重启）。三件事都必须在窗口/适配器创建之前落实：
+    // ① 呈现节拍基准（`set_present_hook`）——必须在第一帧呈现前注册好，否则前
+    //    几帧的呈现周期估计缺失；
+    // ② present_mode → `ICED_PRESENT_MODE`，由
+    //    `iced_wgpu::settings::present_mode_from_env` 解析成 wgpu PresentMode；
+    // ③ prefer_integrated_gpu → `WGPU_POWER_PREF=low`，双显卡机器锁定核显避免
+    //    唤醒独显。
+    // 语义与取值白名单都记在 `viewframe::boot`。
+    viewframe::boot::install_present_hook();
     let boot_config = app::config::Config::load();
-    let present_mode = boot_config.renderer.present_mode.as_str();
-    // **环境里已有值时不覆盖。** 这条 `set_var` 原本无条件执行，把继承来的
-    // `ICED_PRESENT_MODE` 覆盖成配置值——于是"改环境变量来 A/B 呈现模式"这件
-    // 事根本做不到（实测设 mailbox 仍跑 AutoVsync，日志里子进程看到的是
-    // `Some("vsync")`）。而这恰恰是排查呈现/撕裂问题时唯一的逃生口：
-    // 配置文件是持久状态，改它要重启、且会污染用户设置。
-    let env_present_mode = std::env::var("ICED_PRESENT_MODE")
-        .ok()
-        .filter(|v| !v.trim().is_empty());
-    if let Some(from_env) = env_present_mode {
-        eprintln!(
-            "[viewstage] ICED_PRESENT_MODE 已在环境中（{from_env}），\
-             优先于配置值 {present_mode}"
-        );
-    } else if matches!(
-        present_mode,
-        "immediate" | "no_vsync" | "mailbox" | "vsync" | "fifo" | "fifo_relaxed"
-    ) {
-        std::env::set_var("ICED_PRESENT_MODE", present_mode);
-    } else {
-        // `Config::normalize` 已兜底，这里只是防御：拼错的键必须响亮地失败，
-        // 不能悄悄退回 vsync（那正是"设了没生效"的来源）。
-        eprintln!("[viewstage] 未知的 present_mode={present_mode}，使用 iced 默认 AutoVsync");
-    }
-    if boot_config.renderer.prefer_integrated_gpu
-        && std::env::var("WGPU_POWER_PREF").is_err()
-    {
-        std::env::set_var("WGPU_POWER_PREF", "low");
-    }
+    viewframe::boot::apply_present_mode(&boot_config.renderer.present_mode);
+    viewframe::boot::apply_power_pref(boot_config.renderer.prefer_integrated_gpu);
 
     // 日志写**文件**：原先用 TermLogger 输出到终端，而从 Explorer 启动时通常
     // 没有可见控制台——`RawTouch: hook installed` / `hook 安装失败` 这类唯一
