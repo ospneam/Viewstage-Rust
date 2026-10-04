@@ -1235,17 +1235,71 @@ mod eraser_reject_tests {
         );
     }
 
-    /// 零宽笔画（笔锋全收尖）不产生任何查询 → 早退必须放行为"无需扣除"，
-    /// 且不得因为包围盒退化（EMPTY）而出错。
+    /// 与退化输入有关的三条不变式。
+    ///
+    /// # 本测试的更正历史
+    ///
+    /// 原名 `early_reject_handles_degenerate_bounds`，断言
+    /// `tessellate_stroke_indexed(&ink, &idx).is_some()`，注释说"单采样点走点画
+    /// 分支，压根不到 `may_touch_samples`"——即认为零宽的单点笔画仍画出圆点。
+    /// 紧邻的 `may_touch_samples` 断言又说零宽采样"无需扣除"，两者本就矛盾。
+    ///
+    /// **它失败的原因与零宽无关**：原测试在 (50,50) 放了一条覆盖性橡皮擦，圆点被
+    /// 整点擦掉，于是 `geometry.is_empty()` 命中、返回 `None`。
+    ///
+    /// 实测（空索引下的对照）纠正了另一个更重要的误解：
+    ///
+    /// ```text
+    /// 宽度 0    → Some，bounds [50,50,50,50]   ← 零面积片段，不是圆点
+    /// 宽度 10   → Some，bounds [45,45,55,55]   ← 真正的圆点
+    /// ```
+    ///
+    /// **零宽笔画并不被丢弃**，而是照常产出一个零面积片段（屏幕上不可见，但仍会
+    /// 被上传）。曾以为它已被早退丢弃——那个说法是错的，本注释以免再犯。
+    ///
+    /// 顺带说明零宽为何不值得专门优化：**经配置不可达**。起笔锥度下限是
+    /// `MIN_START_RATIO = 0.2`，收笔锥度下限 `pen_min_width_ratio` 被
+    /// `Config::sanitize` 钳到 `[0.05, 1.0]`，所以任何运行期笔宽都到不了 0
+    /// （最小可达值是基准宽的 5%）。这条退化路径只是防御性的，不值得为它改热路径。
     #[test]
-    fn early_reject_handles_degenerate_bounds() {
-        let mut ink = DrawStroke::new("#112233".into(), 10.0, 1, 0.4, 30.0);
-        ink.add_point(50.0, 50.0, 50.0, 50.0);
-        ink.variable_widths.push(0.0);
-        let idx = build_eraser_index(&[eraser(9, 20.0, &[(50.0, 50.0), (90.0, 50.0)])], None);
-        // 单采样点 → 走点画分支，压根不到 may_touch_samples
-        assert!(tessellate_stroke_indexed(&ink, &idx).is_some());
-        // 显式验证零宽折线的判定
+    fn degenerate_input_invariants() {
+        // ---- 1. 单点笔画本身不是丢弃理由 ----
+        let empty = build_eraser_index(&[], None);
+        let mut dot = DrawStroke::new("#112233".into(), 10.0, 1, 0.4, 30.0);
+        dot.add_point(50.0, 50.0, 50.0, 50.0);
+        dot.variable_widths.push(10.0);
+        let geometry = tessellate_stroke_indexed(&dot, &empty)
+            .expect("非零宽的单点笔画应镶嵌出一个圆点");
+        assert_eq!(
+            geometry.bounds(),
+            [45.0, 45.0, 55.0, 55.0],
+            "单点应按笔宽膨胀成直径 10 的圆点"
+        );
+
+        // ---- 2. 橡皮擦完全覆盖 → 几何为空 → None ----
+        // 这才是原测试真正撞上的行为，也是它本该钉住的不变式。
+        let idx = build_eraser_index(
+            &[eraser(9, 20.0, &[(50.0, 50.0), (90.0, 50.0)])],
+            None,
+        );
+        assert!(
+            tessellate_stroke_indexed(&dot, &idx).is_none(),
+            "被橡皮擦完全覆盖的笔画应产出空几何并返回 None"
+        );
+
+        // ---- 3. 零宽产出零面积片段（不是圆点，也不被丢弃）----
+        let mut zero = DrawStroke::new("#112233".into(), 10.0, 1, 0.4, 30.0);
+        zero.add_point(50.0, 50.0, 50.0, 50.0);
+        zero.variable_widths.push(0.0);
+        let zero_geometry = tessellate_stroke_indexed(&zero, &empty)
+            .expect("零宽照常产出片段（当前行为，见上方更正历史）");
+        assert_eq!(
+            zero_geometry.bounds(),
+            [50.0, 50.0, 50.0, 50.0],
+            "零宽笔画的包围盒应退化成一个点——即零面积、屏幕不可见"
+        );
+
+        // ---- 4. 橡皮擦索引侧：零宽采样折线判定为"无需扣除" ----
         let zero_samples = vec![(0.0f32, 0.0f32, 0.0f32)];
         assert!(
             !idx.may_touch_samples(&zero_samples),
@@ -1422,11 +1476,24 @@ mod chunk_merge_tests {
         let mut plain = Vec::new();
         assert!(tessellate_live_range_segs(&s, &path, 0, 79, &mut scratch, &mut plain));
 
-        assert_eq!(sample_count - 1, plain.len(), "基准：逐采样发射 = 采样数-1");
+        // 实测（80 点密笔画）：sample_count=140、merged=26、plain=71。
+        //
+        // 原测试在此处断言 `plain == sample_count - 1`（即"逐采样发射"），已不成立：
+        // `tessellate_live_range_segs` **自身也已合并**，71 约为采样数的一半而不是
+        // 采样数减一。被测的那次优化已经下沉进它原本的对照组里。
+        //
+        // 因此基准不再用"采样数"锚定，改成两条仍然成立、且各自表达真实意图的断言：
+        // 合并发射要比另一条发射路径显著少（满批块的收益），也要比完全不合并显著少
+        // （否则"合并"这个动作根本没发生）。
         assert!(
             merged_count * 2 < plain.len(),
-            "合并后实例数应至少减半：merged={merged_count} plain={}",
+            "合并后实例数应至少比逐段发射减半：merged={merged_count} plain={}",
             plain.len()
+        );
+        assert!(
+            merged_count * 2 < sample_count,
+            "合并后实例数应至少比采样数减半，否则合并没有生效：\
+             merged={merged_count} samples={sample_count}"
         );
     }
 
