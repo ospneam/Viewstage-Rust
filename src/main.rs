@@ -44,12 +44,15 @@ use viewink::ink::stroke::DrawStroke;
 use viewcore_touch::{Momentum, ScreenTransform};
 
 // ==================
-// 输入诊断计数器（并入 `viewink::stats` 的 1 秒报表）
+// 输入诊断计数器（并入渲染层 stats 的 1 秒报表）
 // ==================
 // 曾经还有一个独立的 `[rate]` 报表（`report_input_rate` + DRAW_FRAMES +
 // RATE_LAST），现已删除：它的采样窗口是"每 30 帧"，于是**只有在帧率低于
 // 30/s 时才发得出报表**，读数系统性偏低（实测它报 25fps 而同一时刻 rstat
 // 报 55fps）。诊断速率只有一个权威来源——`stats::end_frame` 驱动的 1 秒窗口。
+//
+// 打点入口是 `viewframe::Instrument`，本文件不直接引用渲染层的统计模块：
+// 统计口径变了不会牵动应用，而统计与呈现格式在 `viewframe::hud` 里一起改。
 
 // ==================
 // ToolButton
@@ -855,7 +858,7 @@ impl App {
             self.live.transform.offset_x.set(self.live.transform.offset_x.get() + dx);
             self.live.transform.offset_y.set(self.live.transform.offset_y.get() + dy);
         }
-        viewink::stats::set_redraw_source(viewink::stats::RedrawSource::Momentum);
+        viewframe::Instrument::set_redraw_source(viewframe::RedrawSource::Momentum);
         Some(Action::request_redraw())
     }
 
@@ -918,7 +921,7 @@ impl App {
     }
 
 fn on_touch(&self, touch: &iced::touch::Event, position: Point) -> Option<Action<Message>> {
-        viewink::stats::add_touch_event();
+        viewframe::Instrument::add_touch_event();
         self.mark_input();
         match *touch {
             iced::touch::Event::FingerPressed { .. } => {
@@ -928,12 +931,12 @@ fn on_touch(&self, touch: &iced::touch::Event, position: Point) -> Option<Action
                 match self.draw_mode {
                     DrawMode::Comment => {
                         self.is_drawing.set(true);
-                        viewink::stats::add_touch_stroke_started();
+                        viewframe::Instrument::add_touch_stroke_started();
                         self.begin_pen_stroke(position.x, position.y);
                     }
                     DrawMode::Eraser => {
                         self.is_drawing.set(true);
-                        viewink::stats::add_touch_stroke_started();
+                        viewframe::Instrument::add_touch_stroke_started();
                         self.begin_eraser_stroke(position.x, position.y);
                     }
                     DrawMode::Move => {
@@ -997,7 +1000,7 @@ fn on_touch(&self, touch: &iced::touch::Event, position: Point) -> Option<Action
                         // `frozen` 在拍照后置位（相机线程同时转入冻结，不再推帧）；
                         // 这里兜底丢弃已经在途的迟到帧，避免一次无谓的纹理上传
                         // 与全帧重绘驱动。
-                        viewink::stats::note_camera_frame(frame.width, frame.height);
+                        viewframe::Instrument::note_camera_frame(frame.width, frame.height);
                         if !self.frozen {
                             // **只入待上屏槽位，不直接上屏。** 帧序号（generation）
                             // 必须在这里盖上：上传侧（`viewgfx::update_camera_params`）
@@ -1093,9 +1096,7 @@ fn on_touch(&self, touch: &iced::touch::Event, position: Point) -> Option<Action
                     }
                 }
                 // 几何换新必须重画：静态层要按新段表重新上传 + 剔除。
-                viewink::stats::set_redraw_source(
-                    viewink::stats::RedrawSource::StrokeComputed,
-                );
+                viewframe::Instrument::set_redraw_source(viewframe::RedrawSource::StrokeComputed);
             }
             Message::ToolClicked(tool) => {
                 let was_same_tool = self.active_tool == tool;
@@ -1598,7 +1599,7 @@ fn on_touch(&self, touch: &iced::touch::Event, position: Point) -> Option<Action
     fn view(&self) -> Element<'_, Message> {
         let start = Instant::now();
         let element = self.view_inner();
-        viewink::stats::add_view(start.elapsed());
+        viewframe::Instrument::note_view_cost(start.elapsed());
         element
     }
 
@@ -1832,71 +1833,18 @@ fn on_touch(&self, touch: &iced::touch::Event, position: Point) -> Option<Action
             layers.push(m.into());
         }
 
-        // 性能 HUD（开发者模式）：左上角显示 FPS/帧时间/内存/笔擦网格数量
+        // 性能 HUD（开发者模式）：左上角显示 FPS/帧时间/内存/笔擦网格数量。
+        //
+        // 渲染指标的读取与排版都在 `viewframe::hud` 里——统计口径与呈现格式必须
+        // 一起改（「驻留段数 × 64B = 显存」这类换算只改一边，HUD 就会开始说谎）。
+        // 本方法只负责提供三项渲染层无从得知的文档计数。
         if self.config.developer.perf_monitor_enabled {
-            // 采样在 `viewframe::FrameMetrics::sample_perf`（draw 路径，每帧），
-            // 这里只读最近一次的窗口结果。
-            let perf = self.frame.metrics().perf();
-            let fps = perf.fps;
-            let frame_ms = perf.frame_ms;
-            let mem = perf.memory_mb;
-            let stroke_count = self.strokes.len();
-            let eraser_count = self.erasers.len();
-            let mesh_count = self.stroke_mesh_cache.len();
-            // 视口剔除效果：静态层实际绘制的笔画数 vs 总量
-            let (visible, total) = viewink::stats::static_visible();
-            // 驻留式上传：缓冲按整份文档增长（×64B 即显存），绘制按可见区间分批
-            let (resident_segs, draw_ranges) = viewink::stats::static_resident();
-            // 帧率稳定性：实测刷新周期 + 长帧数（>1.5 周期）+ 窗口内最坏帧。
-            // `long > 0` 即表示存在肉眼可见的顿挫，是"稳定 60fps"的判定点。
-            let (long_frames, worst_ms) = viewink::stats::frame_stability();
-            // 帧预算：宿主在帧内可控的 CPU 开销（镶嵌 + 打包上传 + 剔除）
-            // 对比实测刷新周期。逼近周期即必然出现长帧（错过 vsync 死线
-            // = 整帧多等一个周期），这是"笔迹是否跟手"的唯一硬指标。
-            let (prep_avg, prep_max, work_avg, work_max, refresh_ms) =
-                viewink::stats::frame_budget();
-            // 静态层离屏缓存是否命中（高密度文档才启用；0 = 密度不够或键在变）
-            let raster = viewink::stats::raster_blit_used();
-            // GPU 侧成本核算（估计值，非硬件计时）：墨迹片元 vs 全屏 blit 纹素。
-            // 二者哪个大，决定了"还值不值得再往下压"。
-            let (_, ink_frag, blit_texels, _) = viewink::stats::raster_cost();
-            // 触控诊断：经框架原生 `Event::Touch` 真正起笔的次数（自定义 hook 管线已
-            // 删除，"hook 装没装 / WM_POINTER / 入队 / drain"那组计数恒为 0，
-            // 是误导性噪声，故不再显示）。
-            let touch_strokes = viewink::stats::touch_strokes_started();
-            let info = format!(
-                "FPS {:.0} | 帧 {:.1} ms\n内存 {:.1} MB\n笔画 {} | 擦除 {} | 网格 {}\n\
-                 静态可见 {}/{}\n驻留 {} 段 {:.1} MB | 绘制 {} 批\n\
-                 刷新 {:.1} Hz | 长帧 {} | 最坏 {:.1} ms\n\
-                 帧预算 {:.2}/{:.2} ms（{:.0}%）\n\
-                 离屏缓存 {} | 墨迹 {:.2} Mpx | blit {:.2} Mpx\n\
-                 触控起笔 {}",
-                fps,
-                frame_ms,
-                mem,
-                stroke_count,
-                eraser_count,
-                mesh_count,
-                visible,
-                total,
-                resident_segs,
-                resident_segs as f64 * 32.0 / (1024.0 * 1024.0),
-                draw_ranges,
-                1000.0 / viewink::stats::measured_refresh_ms().max(0.001),
-                long_frames,
-                worst_ms,
-                work_avg + prep_avg,
-                work_max + prep_max,
-                if refresh_ms > 0.0 {
-                    (work_avg + prep_avg) * 100.0 / refresh_ms
-                } else {
-                    0.0
-                },
-                if raster { "命中" } else { "未启用" },
-                ink_frag as f64 / 1_000_000.0,
-                blit_texels as f64 / 1_000_000.0,
-                touch_strokes,
-            );
+            let info = viewframe::hud::text(viewframe::HudInputs {
+                perf: self.frame.metrics().perf(),
+                stroke_count: self.strokes.len(),
+                eraser_count: self.erasers.len(),
+                mesh_count: self.stroke_mesh_cache.len(),
+            });
             let hud_box = container(
                 text(info)
                     .size(12)
@@ -2070,7 +2018,7 @@ fn poll_live_frame(
             let prev = CAPTURE_SRC_LAST.with(|s| s.get());
             if let Some(prev) = prev {
                 if ts > prev {
-                    viewink::stats::note_camera_source_interval(ts - prev);
+                    viewframe::Instrument::note_camera_source_interval(ts - prev);
                 }
             }
             CAPTURE_SRC_LAST.with(|s| s.set(Some(ts)));
@@ -2289,7 +2237,7 @@ fn camera_worker() -> impl iced::futures::Stream<Item = Message> {
                         // 与 present 路径产生的。两者的修法完全不同。
                         CAPTURE_LAST_AT.with(|slot| {
                             if let Some(prev) = slot.get() {
-                                viewink::stats::note_camera_interval(
+                                viewframe::Instrument::note_camera_interval(
                                     frame_start.duration_since(prev),
                                 );
                             }
@@ -2332,7 +2280,7 @@ fn camera_worker() -> impl iced::futures::Stream<Item = Message> {
                         // poll 自身耗时与"轮次间隔"必须分开量：间隔 = poll + sleep，
                         // 不分开就无法判断节拍是被**摄像头阻塞**拉长的，还是被
                         // 自己的 sleep 算错的。实测两种解释都出现过。
-                        viewink::stats::note_camera_poll(frame_start.elapsed());
+                        viewframe::Instrument::note_camera_poll(frame_start.elapsed());
                         // **绝对时刻推进，不累积漂移。**
                         //
                         // 旧写法 `sleep(period - elapsed)` 以"本轮起点"为基准，

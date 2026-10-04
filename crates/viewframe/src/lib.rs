@@ -35,6 +35,7 @@ pub mod boot;
 pub mod channels;
 pub mod display;
 pub mod grid;
+pub mod hud;
 pub mod metrics;
 pub mod pacing;
 
@@ -42,6 +43,7 @@ use std::time::Instant;
 
 pub use channels::Channels;
 pub use grid::CameraGrid;
+pub use hud::{HudInputs, Instrument, RedrawSource};
 pub use metrics::{FrameMetrics, PerfSnapshot};
 pub use pacing::{
     effective_period_ms, measured_refresh_hz, note_present, panel_period, skip_count,
