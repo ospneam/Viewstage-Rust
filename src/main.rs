@@ -2,7 +2,7 @@ mod app;
 mod sys;
 mod views;
 
-use std::cell::{Cell, RefCell};
+use std::cell::Cell;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -40,7 +40,6 @@ struct ImageEntry {
 }
 use app::source_manager::{SourceId, SourceManager, SourceState};
 use viewink::ink::history::{DrawCommand, HistoryManager, UndoneCommand};
-use viewink::ink::tessellator::apply_start_taper;
 use viewink::ink::stroke::DrawStroke;
 use viewcore_touch::{Momentum, ScreenTransform};
 
@@ -329,10 +328,9 @@ pub struct App {
     stroke_compute_sender: Option<StrokeTaskSender>,
     next_stroke_id: std::cell::Cell<u64>,
     // 逐笔画画布坐标几何缓存（key = 笔画 id）。笔画完成时插入未扣几何，
-    // 后台线程返回扣除几何后替换；橡皮擦完成时只重建相交笔画（targeted rebuild）
-    stroke_mesh_cache: RefCell<std::collections::HashMap<u64, viewgfx::CachedMesh>>,
-    // 缓存代数：任意 mutation 点递增，静态快照同步用 O(1) 比较替代 O(n) 扫描
-    mesh_cache_generation: Cell<u64>,
+    // 后台线程返回扣除几何后替换；橡皮擦完成时只重建相交笔画（targeted rebuild）。
+    // 缓存与代数的全部变更规则收在 `viewgfx::MeshCache` 内。
+    stroke_mesh_cache: viewgfx::MeshCache,
     // 橡皮擦代数：新增橡皮擦完成后自增，用于丢弃后台线程的过期结果
     eraser_generation: Cell<u64>,
     // 橡皮擦集：权威列表 + 供后台线程共享的只读快照（写时复制，见
@@ -413,8 +411,7 @@ impl Default for App {
             camera_sender: None,
             stroke_compute_sender: None,
             next_stroke_id: std::cell::Cell::new(0),
-            stroke_mesh_cache: RefCell::new(std::collections::HashMap::new()),
-            mesh_cache_generation: Cell::new(0),
+            stroke_mesh_cache: viewgfx::MeshCache::new(),
             eraser_generation: Cell::new(0),
             erasers: viewink::ink::eraser::EraserSet::new(),
             source_manager: {
@@ -533,13 +530,8 @@ impl App {
         });
         // 立即用「未扣几何」兜底插入缓存（下一帧即可渲染，避免闪一帧），
         // 后台线程返回更精确的扣除几何后再替换。
-        if let Some(uncut) = viewink::ink::mesh::tessellate_stroke_canvas(&stroke, &[], None) {
-            self.stroke_mesh_cache.borrow_mut().insert(
-                stroke_id,
-                viewgfx::CachedMesh::new(uncut, self.eraser_generation.get()),
-            );
-            self.touch_mesh_cache();
-        }
+        self.stroke_mesh_cache
+            .insert_uncut(&stroke, self.eraser_generation.get());
         // 后台线程需要一份只读副本（它要重算扣除版几何，无法复用已插入缓存的
         // 兜底几何）。每笔一次，非帧热路径，保持直接克隆。
         let stroke_for_compute = stroke.clone();
@@ -639,68 +631,21 @@ impl App {
 
     /// 全量重建逐笔画几何缓存（Clear/Snapshot 撤销、切换源恢复时调用）。
     fn rebuild_stroke_mesh_cache(&mut self) {
-        let generation = self.eraser_generation.get();
-        // 橡皮擦空间索引建一次、被全部笔画复用：旧实现每条笔画都从零重建
-        // 一遍索引 → O(笔画数 × 橡皮擦数 × 橡皮擦点数)，索引构建反客为主。
-        let index = viewink::ink::mesh::build_eraser_index(self.erasers.as_slice(), None);
-        let mut cache = self.stroke_mesh_cache.borrow_mut();
-        cache.clear();
-        for stroke in &self.strokes {
-            if let Some(mesh) =
-                viewink::ink::mesh::tessellate_stroke_indexed(stroke, &index)
-            {
-                cache.insert(stroke.id, viewgfx::CachedMesh::new(mesh, generation));
-            }
-        }
-        drop(cache);
-        self.touch_mesh_cache();
+        self.stroke_mesh_cache.rebuild(
+            &self.strokes,
+            &self.erasers,
+            self.eraser_generation.get(),
+        );
     }
 
-    /// 缓存内容变化后递增代数（view() 的 O(1) 失效判断依据）。
-    fn touch_mesh_cache(&self) {
-        self.mesh_cache_generation
-            .set(self.mesh_cache_generation.get() + 1);
-    }
-
-    /// 笔画集已清空时的缓存清理（无可渲染对象，无需任何重网格化）。
-    fn clear_stroke_mesh_cache(&mut self) {
-        self.stroke_mesh_cache.borrow_mut().clear();
-        self.touch_mesh_cache();
-    }
-
-    /// 橡皮擦被撤销后定向重建：仅 id 更小且与其 bounds 相交的笔画，
-    /// 用恢复后的橡皮擦集重算缓存（替代全量重网格化）。
+    /// 橡皮擦被撤销后定向重建：仅 id 更小且与其 bounds 相交的笔画。
     fn retessellate_affected_by_eraser(&mut self, eraser: &DrawStroke) {
-        let generation = self.eraser_generation.get();
-        let eb = eraser.bounds;
-        let intersects = |s: &DrawStroke| {
-            s.id < eraser.id
-                && s.bounds.intersects(
-                    eb.min_x,
-                    eb.min_y,
-                    eb.max_x - eb.min_x,
-                    eb.max_y - eb.min_y,
-                )
-        };
-        // 无相交笔画直接早退：省掉索引构建与缓存借用（旧实现先克隆整个橡皮擦集
-        // 再判空，橡皮擦多时这笔克隆纯属浪费）。
-        if !self.strokes.iter().any(intersects) {
-            return;
-        }
-        // 橡皮擦集已恢复，索引建一次、被全部相交笔画复用。
-        let index = viewink::ink::mesh::build_eraser_index(self.erasers.as_slice(), None);
-        // 单趟完成判定与重算：旧实现先收集 `affected: Vec<u64>` 再用
-        // `contains` 过滤，第二次遍历是 O(笔画数 × 相交数) 的线性查找。
-        let mut cache = self.stroke_mesh_cache.borrow_mut();
-        for stroke in self.strokes.iter().filter(|s| intersects(s)) {
-            if let Some(mesh) =
-                viewink::ink::mesh::tessellate_stroke_indexed(stroke, &index)
-            {
-                cache.insert(stroke.id, viewgfx::CachedMesh::new(mesh, generation));
-            }
-        }
-        drop(cache);
-        self.touch_mesh_cache();
+        self.stroke_mesh_cache.retessellate_affected_by_eraser(
+            &self.strokes,
+            &self.erasers,
+            self.eraser_generation.get(),
+            eraser,
+        );
     }
 
     /// 保存当前源、切换到目标源 id；如果目标源有缓存状态则恢复
@@ -719,7 +664,7 @@ impl App {
             self.current_image_index = None;
             self.showing_image = false;
             self.history.clear();
-            self.clear_stroke_mesh_cache();
+            self.stroke_mesh_cache.clear();
         }
     }
 
@@ -773,57 +718,54 @@ impl App {
     // (消除 CanvasPressed/Moved 与 RawTouchStart/Move 两处 ~100 行重复)
     // ==============================
 
+    /// 起笔参数：由配置 + 当前缩放翻译成画布坐标的笔参数。
+    ///
+    /// 笔宽要除以当前缩放：笔宽是**画布坐标**，于是放大画布后同样的笔宽在屏幕
+    /// 上看起来更粗——这正是"固定画布粗细"的文档批注手感。
+    fn pen_params(&self) -> viewgfx::PenParams {
+        viewgfx::PenParams {
+            color: self.get_pen_color(),
+            width: self.get_pen_width(),
+            min_width_ratio: self.config.canvas.pen_min_width_ratio,
+            tail_duration: self.config.canvas.pen_tail_duration,
+            eraser_size_screen: self.config.canvas.eraser_size,
+        }
+    }
+
     fn begin_pen_stroke(&self, screen_x: f32, screen_y: f32) {
-        let live = &self.live;
-        let color = self.get_pen_color();
-        let width = self.get_pen_width();
         let (cx, cy) = self.screen_to_canvas(screen_x, screen_y);
         let id = self.alloc_stroke_id();
-        self.trail_color_rgb.set(Self::hex_to_f32_rgb(&color));
-        live.pen_speed_buffer.set([0.0; 3]);
-        live.pen_speed_count.set(0);
-        live.pen_speed_write.set(0);
-        live.pen_stroke_start_time.set(Some(Instant::now()));
-        live.pen_last_move_time.set(Some(Instant::now()));
-        live.pen_total_segments.set(1);
-        let mut s = DrawStroke::new(
-            color,
-            width,
+        let rgb = viewgfx::stroke::begin_pen_stroke(
+            &self.live,
+            &self.pen_params(),
             id,
-            self.config.canvas.pen_min_width_ratio,
-            self.config.canvas.pen_tail_duration,
+            cx,
+            cy,
         );
-        s.points.reserve(200);
-        s.variable_widths.reserve(200);
-        s.variable_widths.push(apply_start_taper(width, width, 0));
-        s.segment_times = Some(vec![0.0]);
-        s.add_point(cx, cy, cx, cy);
-        *live.current_stroke.borrow_mut() = Some(s);
+        self.trail_color_rgb.set(rgb);
     }
 
     fn begin_eraser_stroke(&self, screen_x: f32, screen_y: f32) {
-        let live = &self.live;
         let (cx, cy) = self.screen_to_canvas(screen_x, screen_y);
-        let base_eraser_size = self.config.canvas.eraser_size / live.transform.scale.get();
         let id = self.alloc_stroke_id();
-        let mut eraser_stroke = DrawStroke::new_eraser(base_eraser_size, id);
-        eraser_stroke.points.reserve(200);
-        eraser_stroke.variable_widths.reserve(200);
-        eraser_stroke.add_point(cx, cy, cx, cy);
-        eraser_stroke.variable_widths.push(base_eraser_size);
-        *live.current_eraser_stroke.borrow_mut() = Some(eraser_stroke);
+        viewgfx::stroke::begin_eraser_stroke(
+            &self.live,
+            self.config.canvas.eraser_size,
+            id,
+            cx,
+            cy,
+        );
     }
 
     /// 橡皮擦悬停光标：屏幕坐标 → 画布坐标 + 半径（GPU 动态层消费）
     fn update_eraser_cursor(&self, screen_x: f32, screen_y: f32) {
         let (cx, cy) = self.screen_to_canvas(screen_x, screen_y);
-        let scale = self.live.transform.scale.get();
-        self.live.eraser_cursor.set(Some(viewink::live::EraserCursor {
+        viewgfx::stroke::update_eraser_cursor(
+            &self.live,
+            self.config.canvas.eraser_size,
             cx,
             cy,
-            radius: self.config.canvas.eraser_size / 2.0 / scale,
-            border: 2.0 / scale,
-        }));
+        );
     }
 
 
@@ -1153,24 +1095,18 @@ fn on_touch(&self, touch: &iced::touch::Event, position: Point) -> Option<Action
             Message::StrokeComputed(result) => {
                 // 主线程已在 finalize_stroke 里插入未扣几何兜底；
                 // 后台的扣除几何替换兜底（erasure 更精确的版本）
-                let mut touched = false;
-                {
-                    let mut cache = self.stroke_mesh_cache.borrow_mut();
-                    if let Some(geometry) = result.geometry {
-                        let stale = cache
-                            .get(&result.stroke_id)
-                            .is_some_and(|c| c.eraser_generation > result.eraser_generation);
-                        if !stale && self.strokes.iter().any(|s| s.id == result.stroke_id) {
-                            cache.insert(
-                                result.stroke_id,
-                                viewgfx::CachedMesh::new(geometry, result.eraser_generation),
-                            );
-                            touched = true;
-                        }
+                //
+                // `MeshCache::replace` 内部做陈旧判定（不比缓存里现有的更旧才换）并在替换成功
+                // 时自行 touch；但"这条笔画是否还存在"要问 App —— 撤销可能已经
+                // 把它删了，此时不该让一个已撤销的笔画重新进缓存。
+                if let Some(geometry) = result.geometry {
+                    if self.strokes.iter().any(|s| s.id == result.stroke_id) {
+                        self.stroke_mesh_cache.replace(
+                            result.stroke_id,
+                            geometry,
+                            result.eraser_generation,
+                        );
                     }
-                }
-                if touched {
-                    self.touch_mesh_cache();
                 }
                 // 几何换新必须重画：静态层要按新段表重新上传 + 剔除。
                 viewink::stats::set_redraw_source(
@@ -1238,9 +1174,9 @@ fn on_touch(&self, touch: &iced::touch::Event, position: Point) -> Option<Action
                             .undo(&mut self.strokes, &mut self.erasers)
                         {
                             Some(UndoneCommand::Draw(id)) => {
-                                if self.stroke_mesh_cache.borrow_mut().remove(&id).is_some() {
-                                    self.touch_mesh_cache();
-                                }
+                                // `remove` 内部只在真的移除过时才 touch——没移除
+                                // 就不必让渲染侧重算静态快照。
+                                self.stroke_mesh_cache.remove(id);
                             }
                             Some(UndoneCommand::Erase(eraser)) => {
                                 self.retessellate_affected_by_eraser(&eraser);
@@ -1529,7 +1465,7 @@ fn on_touch(&self, touch: &iced::touch::Event, position: Point) -> Option<Action
                 if val >= 95.0 {
                     self.strokes.clear();
                     self.history.clear();
-                    self.clear_stroke_mesh_cache();
+                    self.stroke_mesh_cache.clear();
                     self.eraser_clear_slider = 0.0;
                 } else {
                     self.eraser_clear_slider = val;
@@ -1704,11 +1640,11 @@ fn on_touch(&self, touch: &iced::touch::Event, position: Point) -> Option<Action
 
         // 批注层（直通合成通道渲染，无 widget）：每帧编排（静态快照同步 /
         // 增量镶嵌）全部写进共享 LiveCanvasState，批注通道 prepare 直读。
-        let mesh_cache = self.stroke_mesh_cache.borrow();
+        let mesh_cache = self.stroke_mesh_cache.snapshot();
         self.gfx.annotation_frame(
             viewgfx::FrameInputs {
                 mesh_cache: &mesh_cache,
-                mesh_generation: self.mesh_cache_generation.get(),
+                mesh_generation: self.stroke_mesh_cache.generation(),
                 touch_trail: None,
             },
             &mut |_out| {},
@@ -1922,7 +1858,7 @@ fn on_touch(&self, touch: &iced::touch::Event, position: Point) -> Option<Action
             let mem = perf.memory_mb;
             let stroke_count = self.strokes.len();
             let eraser_count = self.erasers.len();
-            let mesh_count = self.stroke_mesh_cache.borrow().len();
+            let mesh_count = self.stroke_mesh_cache.len();
             // 视口剔除效果：静态层实际绘制的笔画数 vs 总量
             let (visible, total) = viewink::stats::static_visible();
             // 驻留式上传：缓冲按整份文档增长（×64B 即显存），绘制按可见区间分批

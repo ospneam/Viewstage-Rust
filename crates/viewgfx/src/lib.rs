@@ -28,8 +28,11 @@
 //!   `CanvasGfx` 持有 [`viewink::live::LiveCanvasState`] 的权威 `Arc`，
 //!   主 crate 通过克隆句柄在零消息热路径直写同一状态。
 
+pub mod stroke;
+
 mod background;
 mod live_geo;
+mod mesh_cache;
 mod trail;
 
 use std::cell::{Cell, RefCell};
@@ -41,6 +44,8 @@ use viewcamera::camera::CameraLayer;
 use viewink::live::{LiveCanvasState, StaticStrokeRef};
 
 pub use background::BackgroundInputs;
+pub use mesh_cache::MeshCache;
+pub use stroke::PenParams;
 pub use trail::TouchTrailCtx;
 
 /// 逐笔画网格缓存条目（主 crate `stroke_mesh_cache` 的值类型）。
