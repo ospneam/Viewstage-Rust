@@ -1,0 +1,24 @@
+[package]
+name = "dcomp-rs-min"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "P0 二分：无 wgpu 的纯 windows-rs DComp 最小复刻（对照 C++ dcomp-min.cpp）"
+
+[dependencies]
+wgpu = "27"
+pollster = "0.4"
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.58", features = [
+    "Win32_Foundation",
+    "Win32_System_Com",
+    "Win32_System_LibraryLoader",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_Graphics_DirectComposition",
+    "Win32_Graphics_Direct3D",
+    "Win32_Graphics_Direct3D11",
+    "Win32_Graphics_Dxgi",
+    "Win32_Graphics_Dxgi_Common",
+    "Win32_Graphics_Gdi",
+] }

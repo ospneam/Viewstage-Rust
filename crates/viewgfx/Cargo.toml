@@ -1,0 +1,14 @@
+[package]
+name = "viewgfx"
+version = "0.1.0"
+edition = "2021"
+description = "Canvas graphics orchestration: background layer dirty-cache, live stroke incremental tessellation scheduling, and touch prediction trail with zero-allocation steady state"
+authors = ["SECTL"]
+
+[dependencies]
+# 与 viewstage / viewink / viewcamera 主包保持一致的版本，避免 iced/wgpu 类型被重复编译导致边界类型不匹配
+iced = { version = "0.14", default-features = false, features = ["wgpu", "canvas", "image-without-codecs", "advanced", "tokio", "svg", "crisp", "web-colors"] }
+# 笔迹引擎（LiveCanvasState / 增量镶嵌 / AnnotationLayer / GPU 原语）
+viewink = { path = "../viewink" }
+# 相机层（CameraFrameData / CameraLayer / YUV 矩阵标志）
+viewcamera = { path = "../viewcamera" }

@@ -1,0 +1,20 @@
+[package]
+name = "viewink"
+version = "0.1.0"
+edition = "2021"
+description = "Ink/handwriting engine: stroke model, pen tessellation, and the GPU annotation render pipeline"
+authors = ["SECTL"]
+
+[dependencies]
+# 与 viewstage 主包保持一致的版本，避免 iced/wgpu 类型被重复编译导致边界类型不匹配
+wgpu = "27"
+bytemuck = { version = "1", features = ["derive"] }
+iced = { version = "0.14", default-features = false, features = ["wgpu", "canvas", "image-without-codecs", "advanced", "tokio", "svg", "crisp", "web-colors"] }
+iced_wgpu = "0.14"
+log = "0.4"
+
+[dev-dependencies]
+# WGSL 离线校验：着色器只在 `create_shader_module`（运行期）才会被编译，
+# 一个笔误会一路溜到用户机器上才炸。用 naga（wgpu 27 的同一棵依赖树，
+# 不引入额外编译成本）在 `cargo test` 里就把语法/类型/绑定错误挡住。
+naga = { version = "27", features = ["wgsl-in"] }

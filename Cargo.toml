@@ -1,0 +1,62 @@
+[package]
+name = "viewstage"
+version = "0.1.0"
+edition = "2021"
+description = "A GPU-accelerated camera presentation and document annotation tool"
+authors = ["SECTL"]
+
+[dependencies]
+# image-without-codecs：iced 的 image widget 仅渲染预解码 RGBA（Handle::from_rgba），
+# 解码由下方自管 image 依赖按需完成——避免 iced 默认拉全编解码栈
+iced = { version = "0.14", default-features = false, features = ["wgpu", "canvas", "image-without-codecs", "advanced", "tokio", "svg", "crisp", "web-colors"] }
+iced_winit = "0.14"
+# 直接依赖 fork 内的渲染层：读取层缓存命中计数（[rstat] 诊断用）
+iced_wgpu = "0.14"
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "macros", "time"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+log = "0.4"
+simplelog = "0.12"
+# 仅保留常用图片解码（导入用）；去掉默认的 AV1 编码器/exr/qoi 等编码巨物，保存只用 PNG
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp", "tiff"] }
+# icon 预栅格化抗锯齿（views/icons.rs）：resvg 已在依赖树（iced svg feature），
+# tiny-skia 复用零新增编译成本
+tiny-skia = "0.11"
+dirs = "5"
+rfd = "0.15"
+chrono = "0.4"
+viewink = { path = "crates/viewink" }
+viewcamera = { path = "crates/viewcamera" }
+viewcore-touch = { path = "crates/viewcore-touch" }
+viewicon = { path = "crates/viewicon" }
+viewgfx = { path = "crates/viewgfx" }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = ["Win32_System_Threading", "Win32_System_ProcessStatus", "Win32_System_LibraryLoader", "Win32_UI_WindowsAndMessaging", "Win32_Foundation", "Win32_UI_Input_Pointer", "Win32_UI_Input_Touch", "Win32_UI_HiDpi", "Win32_Graphics_Gdi", "Win32_Media"] }
+
+[profile.release]
+# CPU 密集路径（笔画镶嵌/像素处理）跨 crate 内联优化；
+# codegen-units=1 牺牲编译时间换运行时性能
+lto = "thin"
+codegen-units = 1
+# 展示工具：剥离符号表、终止型 panic（无 catch_unwind），去掉 unwind 表并改善 LTO 死代码消除
+strip = "symbols"
+panic = "abort"
+
+[workspace]
+members = ["crates/viewink", "crates/viewcamera", "crates/viewcore-touch", "crates/viewicon", "crates/viewgfx", "crates/viewcomp", "iced-fork/iced_wgpu-0.14.0"]
+
+# 本地 fork（iced 0.14 家族）：新增层缓存与单层渲染能力，见 iced-fork/ 目录
+[patch.crates-io]
+iced = { path = "iced-fork/iced-0.14.0" }
+iced_core = { path = "iced-fork/iced_core-0.14.0" }
+iced_debug = { path = "iced-fork/iced_debug-0.14.0" }
+iced_futures = { path = "iced-fork/iced_futures-0.14.0" }
+iced_graphics = { path = "iced-fork/iced_graphics-0.14.0" }
+iced_program = { path = "iced-fork/iced_program-0.14.0" }
+iced_renderer = { path = "iced-fork/iced_renderer-0.14.0" }
+iced_runtime = { path = "iced-fork/iced_runtime-0.14.0" }
+iced_tiny_skia = { path = "iced-fork/iced_tiny_skia-0.14.0" }
+iced_wgpu = { path = "iced-fork/iced_wgpu-0.14.0" }
+iced_widget = { path = "iced-fork/iced_widget-0.14.2" }
+iced_winit = { path = "iced-fork/iced_winit-0.14.0" }

@@ -1,0 +1,7 @@
+[package]
+name = "viewicon"
+version = "0.1.0"
+edition = "2021"
+description = "零依赖 SVG 图标解析器：path data 全命令集 + 图标级 SVG 提取 + 弧转三次贝塞尔"
+
+[dependencies]

@@ -1,0 +1,6 @@
+# 覆盖根目录与各 fork crate 内的构建产物（不写 `/target` 是因为 iced-fork/
+# 下各 crate 若单独构建会产生自己的 target/）
+target/
+
+# 真机诊断探针产物（readback BMP / rstat 日志 / GPU 采样 JSON）
+/tmp-probe
