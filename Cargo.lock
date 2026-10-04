@@ -4112,7 +4112,6 @@ dependencies = [
  "chrono",
  "dirs",
  "iced",
- "iced_wgpu",
  "iced_winit",
  "image",
  "log",

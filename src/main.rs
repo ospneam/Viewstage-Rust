@@ -339,9 +339,6 @@ pub struct App {
     erasers: viewink::ink::eraser::EraserSet,
     // 信号源管理
     source_manager: SourceManager,
-    // V2 捏合缩放中点锚点（开始时中点对应的画布坐标；零消息路径写入 → Cell）
-    pinch_start_mid_cx: Cell<f32>,
-    pinch_start_mid_cy: Cell<f32>,
     // 窗口尺寸
     window_size: Size,
     // 设置窗口
@@ -419,8 +416,6 @@ impl Default for App {
                 sm.enter(SourceId::Camera);
                 sm
             },
-            pinch_start_mid_cx: Cell::new(0.0),
-            pinch_start_mid_cy: Cell::new(0.0),
             window_size: Size::new(1280.0, 720.0),
             open_settings_windows: std::collections::HashSet::new(),
             settings_section: SettingsSection::Application,
@@ -2195,7 +2190,9 @@ impl CameraWorkerState {
     }
 }
 
-/// 采集侧节拍诊断的计数器（采集线程内）。
+// 采集侧节拍诊断的计数器（采集线程内）。
+// 注意：这是普通注释而非文档注释——`thread_local!` 是宏调用，rustdoc 不会为它
+// 生成文档，文档注释会触发 unused_doc_comments 警告。
 thread_local! {
     static CAMERA_DIAG: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
 }

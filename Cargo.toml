@@ -9,9 +9,12 @@ authors = ["SECTL"]
 # image-without-codecs：iced 的 image widget 仅渲染预解码 RGBA（Handle::from_rgba），
 # 解码由下方自管 image 依赖按需完成——避免 iced 默认拉全编解码栈
 iced = { version = "0.14", default-features = false, features = ["wgpu", "canvas", "image-without-codecs", "advanced", "tokio", "svg", "crisp", "web-colors"] }
+# 直接依赖 fork 内的窗口/事件层： iced_winit::run 是应用入口
 iced_winit = "0.14"
-# 直接依赖 fork 内的渲染层：读取层缓存命中计数（[rstat] 诊断用）
-iced_wgpu = "0.14"
+# 注意：应用**不再**直接依赖 iced_wgpu。原先为了读层缓存命中计数（[rstat] 诊断）
+# 而直连渲染层；通道注册与清屏色已迁入 viewframe::channels，[rstat] 改由
+# viewink::stats 产出，故此处无需 iced_wgpu。fork 本身仍由 viewink / viewcamera /
+# viewframe 依赖，[patch.crates-io] 不可移除。
 tokio = { version = "1", features = ["rt-multi-thread", "sync", "macros", "time"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
