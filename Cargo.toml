@@ -31,6 +31,9 @@ chrono = "0.4"
 viewink = { path = "crates/viewink" }
 viewcamera = { path = "crates/viewcamera" }
 zephyra = { path = "../ZephyraUI/crates/zephyra" }
+# 摄像头采集 + 像素格式处理。开 capture 是因为本应用要接 UVC 摄像头；
+# 框架侧默认关闭，理由见 crates/zephyra-camera/src/lib.rs。
+zephyra-camera = { path = "../ZephyraUI/crates/zephyra-camera", features = ["capture"] }
 viewgfx = { path = "crates/viewgfx" }
 viewframe = { path = "crates/viewframe" }
 zephyra-iced = { path = "crates/zephyra-iced" }

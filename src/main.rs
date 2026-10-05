@@ -1996,8 +1996,8 @@ impl iced::Program for ViewStageApp {
 /// 取一帧实时预览：NV12 直传（零拷贝切片）优先，MJPEG-only 等设备回退 RGB 软件处理。
 /// 帧载荷直接产 viewcamera 类型，Arc 包装在本线程（采集侧）完成——主线程零转换。
 fn poll_live_frame(
-    cam: &mut viewcamera::capture::CameraManager,
-    cpu_processor: &mut viewcamera::gpu_processor::CpuFrameProcessor,
+    cam: &mut zephyra_camera::capture::CameraManager,
+    cpu_processor: &mut zephyra_camera::pixels::CpuFrameProcessor,
 ) -> Option<viewcamera::camera::CameraFrameData> {
     if cam.is_native_nv12() {
         let (data, w, h, capture_ts) = cam.poll_frame_nv12()?;
@@ -2013,7 +2013,7 @@ fn poll_live_frame(
             CAPTURE_SRC_LAST.with(|s| s.set(Some(ts)));
         }
         // 尺寸校验失败时 poll_frame_nv12 已自动降级（下次走 RGB 路径）
-        return viewcamera::gpu_processor::Nv12Planes::split(data, w, h).map(
+        return zephyra_camera::pixels::Nv12Planes::split(data, w, h).map(
             |planes| viewcamera::camera::CameraFrameData {
                 pixels: viewcamera::camera::FramePixels::Nv12 {
                     y: Arc::new(planes.y),
@@ -2042,12 +2042,12 @@ fn poll_live_frame(
 /// 拍照取帧：NV12 时做一次性 RGBA 转换（仅拍照瞬间，不在实时路径），
 /// 主线程拿到统一 RGBA 用于冻结显示与后台 PNG 保存。
 fn poll_captured_frame(
-    cam: &mut viewcamera::capture::CameraManager,
-    cpu_processor: &mut viewcamera::gpu_processor::CpuFrameProcessor,
+    cam: &mut zephyra_camera::capture::CameraManager,
+    cpu_processor: &mut zephyra_camera::pixels::CpuFrameProcessor,
 ) -> Option<CameraEvent> {
     if cam.is_native_nv12() {
         let (data, w, h, _capture_ts) = cam.poll_frame_nv12()?;
-        let planes = viewcamera::gpu_processor::Nv12Planes::split(data, w, h)?;
+        let planes = zephyra_camera::pixels::Nv12Planes::split(data, w, h)?;
         let mut rgba = Vec::with_capacity((w as usize) * (h as usize) * 4);
         planes.to_rgba(&mut rgba);
         return Some(CameraEvent::Captured(viewcamera::camera::CameraFrameData {
@@ -2072,7 +2072,7 @@ fn poll_captured_frame(
 
 /// 摄像头线程状态 + 命令处理（集中一处避免分支重复）。
 struct CameraWorkerState {
-    camera: Option<viewcamera::capture::CameraManager>,
+    camera: Option<zephyra_camera::capture::CameraManager>,
     should_freeze: bool,
     do_capture: bool,
     /// **用户请求**的采集间隔（来自 `frame_rate_mode`）。只由 `Start` 写入。
@@ -2100,7 +2100,7 @@ impl CameraWorkerState {
                 if self.camera.is_some() {
                     return;
                 }
-                let mut cam = viewcamera::capture::CameraManager::new();
+                let mut cam = zephyra_camera::capture::CameraManager::new();
                 let devices = cam.enumerate_devices();
                 if !devices.is_empty() {
                     log::info!("Found {} camera(s)", devices.len());
@@ -2169,7 +2169,7 @@ fn camera_worker() -> impl iced::futures::Stream<Item = Message> {
                 do_capture: false,
                 requested_frame_interval: viewframe::grid::mode_period("normal"),
             };
-            let mut cpu_processor = viewcamera::gpu_processor::CpuFrameProcessor::new();
+            let mut cpu_processor = zephyra_camera::pixels::CpuFrameProcessor::new();
             // 采集节拍的绝对基准。见下面 `next_capture_at` 处的说明。
             let mut next_capture_at = std::time::Instant::now();
 

@@ -2,7 +2,7 @@
 name = "viewcamera"
 version = "0.1.0"
 edition = "2021"
-description = "Camera processing & connection engine: device capture, frame processing, light control, and the wgpu camera render pipeline"
+description = "Camera light control and the wgpu camera render pipeline"
 authors = ["SECTL"]
 
 [dependencies]
@@ -12,9 +12,15 @@ bytemuck = { version = "1", features = ["derive"] }
 iced = { version = "0.14", default-features = false, features = ["wgpu", "canvas", "image-without-codecs", "advanced", "tokio", "svg", "crisp", "web-colors"] }
 iced_wgpu = "0.14"
 log = "0.4"
-# 与 viewstage 主包一致的输入后端
-nokhwa = { version = "0.10", features = ["input-msmf"] }
+# 设备采集与像素格式处理已迁到 zephyra-camera（feature = "capture"）——
+# 见 crates/zephyra-camera/src/lib.rs 里"哪些没有搬过来"一节。
+#
+# 但本 crate 仍然需要 bytes：`FramePixels::Nv12` 直接持有 `bytes::Bytes`，
+# 而 NV12 平面的**生产端**已经在 zephyra-camera 那侧。所以两侧必须解析到同一个
+# bytes 版本，否则 `Arc<Bytes>` 跨边界时类型不匹配——那正是"重复依赖版本"
+# 最容易咬人的地方。
 bytes = "1"
+
 # 笔迹引擎（共享 GPU 原语 / 实时状态 / 渲染统计）
 viewink = { path = "../viewink" }
 
