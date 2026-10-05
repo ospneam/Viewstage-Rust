@@ -30,7 +30,7 @@ rfd = "0.15"
 chrono = "0.4"
 viewink = { path = "crates/viewink" }
 viewcamera = { path = "crates/viewcamera" }
-viewcore-touch = { path = "crates/viewcore-touch" }
+zephyra = { path = "../ZephyraUI/crates/zephyra" }
 viewicon = { path = "crates/viewicon" }
 viewgfx = { path = "crates/viewgfx" }
 viewframe = { path = "crates/viewframe" }
@@ -49,7 +49,7 @@ strip = "symbols"
 panic = "abort"
 
 [workspace]
-members = ["crates/viewink", "crates/viewcamera", "crates/viewcore-touch", "crates/viewicon", "crates/viewgfx", "crates/viewframe", "crates/viewcomp", "crates/zephyra-iced", "iced-fork/iced_wgpu-0.14.0"]
+members = ["crates/viewink", "crates/viewcamera", "crates/viewicon", "crates/viewgfx", "crates/viewframe", "crates/viewcomp", "crates/zephyra-iced", "iced-fork/iced_wgpu-0.14.0"]
 
 # 本地 fork（iced 0.14 家族）：新增层缓存与单层渲染能力，见 iced-fork/ 目录
 [patch.crates-io]

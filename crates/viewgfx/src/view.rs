@@ -6,7 +6,7 @@
 //! 但应用此前直接读写它们——15 处写入散落在 `main.rs`，其中 6 处是
 //! "读出旧值、算一遍、写回去"的手工组合。这类代码的问题不是难看，而是
 //! **不变量没有地方可查**：缩放钳位是 `0.1..=10.0`，它同时出现在滚轮缩放里，
-//! 也存在于 `ScreenTransform::MIN_SCALE/MAX_SCALE`，两处各写一份字面量。
+//! 也存在于 `Viewport::MIN_SCALE/MAX_SCALE`，两处各写一份字面量。
 //! 改其中一个，另一个静默不跟随——而缩放越界是那种"没人会发现直到某天
 //! 画布缩到看不见"的问题。
 //!
@@ -19,10 +19,10 @@
 //! | [`CanvasView::pan_by`] | 画布平移增量（拖拽 / 惯性 / 捏合共用） |
 //! | [`CanvasView::zoom_at`] | 以某个屏幕点为视觉锚点缩放 |
 //!
-//! # 缩放锚点为什么复用 ScreenTransform
+//! # 缩放锚点为什么复用 Viewport
 //!
-//! [`zoom_at`] 不自己实现锚点数学，而是构造 [`ScreenTransform`] 后调
-//! [`ScreenTransform::apply_pinch`]。理由：那段数学（先求世界坐标、缩放、再由
+//! [`zoom_at`] 不自己实现锚点数学，而是构造 [`Viewport`] 后调
+//! [`Viewport::apply_pinch`]。理由：那段数学（先求世界坐标、缩放、再由
 //! 锚点反解偏移）已经被手写过一份，两者必须永远一致，而"两份实现"正是它们会
 //! 漂移的原因。钳位也因此自动跟随 `MIN_SCALE`/`MAX_SCALE`。
 //!
@@ -30,7 +30,7 @@
 //!
 //! 拖拽与惯性都在 `canvas::Program` 的零消息路径上调用，那里只有 `&self`。
 
-use viewcore_touch::ScreenTransform;
+use zephyra::input::Viewport;
 use viewink::live::LiveCanvasState;
 
 /// 画布视图变换的操作面。
@@ -63,7 +63,7 @@ impl<'a> CanvasView<'a> {
     /// 屏幕坐标 → 画布坐标。
     pub fn screen_to_canvas(&self, screen_x: f32, screen_y: f32) -> (f32, f32) {
         let (offset_x, offset_y) = self.offset();
-        ScreenTransform::new(offset_x, offset_y, self.scale()).screen_to_canvas(screen_x, screen_y)
+        Viewport::new(offset_x, offset_y, self.scale()).screen_to_canvas(screen_x, screen_y)
     }
 
     /// 回到恒等变换。
@@ -93,13 +93,13 @@ impl<'a> CanvasView<'a> {
     /// 以屏幕点 `(cursor_x, cursor_y)` 为**视觉锚点**缩放，保持该点之下的
     /// 画布点不动。
     ///
-    /// 缩放结果钳位到 [`ScreenTransform::MIN_SCALE`]..=[`ScreenTransform::MAX_SCALE`]。
-    /// 之所以不自己算：这段锚点数学在 `viewcore-touch` 里已有一份实现，两份
-    /// 必须永远一致。
+    /// 缩放结果钳位到 [`Viewport::MIN_SCALE`]..=[`Viewport::MAX_SCALE`]。
+    /// 之所以不自己算：这段锚点数学是 `zephyra::input::Viewport` 里的同一份实现，
+    /// 缩放的钳位范围也由它单点定义，两处不可能漂移。
     pub fn zoom_at(&self, cursor_x: f32, cursor_y: f32, scale_ratio: f32) {
         let (offset_x, offset_y) = self.offset();
         let scale = self.scale();
-        let mut transform = ScreenTransform::new(offset_x, offset_y, scale);
+        let mut transform = Viewport::new(offset_x, offset_y, scale);
 
         // 锚点 = 缩放前该屏幕点之下的画布点。
         let (anchor_cx, anchor_cy) = transform.screen_to_canvas(cursor_x, cursor_y);
@@ -191,7 +191,7 @@ mod tests {
                 v.zoom_at(0.0, 0.0, 1.5);
             }
             assert!(
-                v.scale() <= ScreenTransform::MAX_SCALE + 1e-6,
+                v.scale() <= Viewport::MAX_SCALE + 1e-6,
                 "连续放大后应停在 MAX_SCALE，实得 {}",
                 v.scale()
             );
@@ -199,7 +199,7 @@ mod tests {
                 v.zoom_at(0.0, 0.0, 0.5);
             }
             assert!(
-                v.scale() >= ScreenTransform::MIN_SCALE - 1e-6,
+                v.scale() >= Viewport::MIN_SCALE - 1e-6,
                 "连续缩小后应停在 MIN_SCALE，实得 {}",
                 v.scale()
             );
@@ -209,7 +209,7 @@ mod tests {
     #[test]
     fn scale_bounds_live_in_one_place() {
         // 缩放钳位只有一处定义：应用层不得再写 0.1 / 10.0 字面量。
-        assert_eq!(ScreenTransform::MIN_SCALE, 0.1);
-        assert_eq!(ScreenTransform::MAX_SCALE, 10.0);
+        assert_eq!(Viewport::MIN_SCALE, 0.1);
+        assert_eq!(Viewport::MAX_SCALE, 10.0);
     }
 }

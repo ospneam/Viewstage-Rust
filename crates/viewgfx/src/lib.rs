@@ -22,7 +22,7 @@
 //!
 //! ## 与主 crate 的分工
 //!
-//! - 主 crate：消息路由、手势识别（viewcore-touch）、平台输入 hook（sys），
+//! - 主 crate：消息路由、手势识别（`zephyra::input`）、平台输入 hook（sys），
 //!   调用本 crate 的门面方法完成每帧编排；
 //! - 本 crate：把「状态 → 每帧图元」的全部决策与缓存收敛到一处，
 //!   `CanvasGfx` 持有 [`viewink::live::LiveCanvasState`] 的权威 `Arc`，

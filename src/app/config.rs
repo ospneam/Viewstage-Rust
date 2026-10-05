@@ -141,7 +141,7 @@ impl Default for StorageSettings {
 /// 已删除的伪字段（详见 docs/ui-truthfulness-audit.md）：
 /// - `pen_min_width_ratio` / `pen_tail_duration`：与 `canvas` 下的同名字段
 ///   重复，且旧设置页写的是这一份副本而应用读的是 `canvas` 那份——滑块无效。
-/// - `max_scale_image`：真正的缩放上限是 `viewcore_touch::ScreenTransform::MAX_SCALE`
+/// - `max_scale_image`：真正的缩放上限是 `zephyra::input::Viewport::MAX_SCALE`
 ///   常量（10.0），此字段无任何读取点。
 /// - `pinch_zoom_v2`：只有一套捏合缩放实现，此开关无任何读取点。
 #[derive(Debug, Clone, Serialize, Deserialize)]

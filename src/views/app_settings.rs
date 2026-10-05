@@ -439,8 +439,8 @@ fn canvas_page(app: &crate::App) -> Element<'_, Message> {
             "滚轮与捏合共用的固定上下限（编译期常量，不可配置）",
             text(format!(
                 "{}% – {}%",
-                (viewcore_touch::ScreenTransform::MIN_SCALE * 100.0) as i32,
-                (viewcore_touch::ScreenTransform::MAX_SCALE * 100.0) as i32
+                (zephyra::input::Viewport::MIN_SCALE * 100.0) as i32,
+                (zephyra::input::Viewport::MAX_SCALE * 100.0) as i32
             ))
             .size(12)
             .color(MUTED)

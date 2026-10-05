@@ -41,7 +41,7 @@ struct ImageEntry {
 use app::source_manager::{SourceId, SourceManager, SourceState};
 use viewink::ink::history::{DrawCommand, HistoryManager, UndoneCommand};
 use viewink::ink::stroke::DrawStroke;
-use viewcore_touch::Momentum;
+use zephyra::input::Momentum;
 
 // ==================
 // 输入诊断计数器（并入渲染层 stats 的 1 秒报表）
@@ -324,7 +324,7 @@ pub struct App {
     last_mouse_pos: std::cell::Cell<Option<(f64, f64)>>,
     /// 最近一次拖拽增量（释放时交给惯性）
     last_pan_delta: std::cell::Cell<(f64, f64)>,
-    /// 惯性（viewcore-touch Momentum）：零消息路径（&self）也要操作 → RefCell
+    /// 惯性（`zephyra::input::Momentum`）：零消息路径（&self）也要操作 → RefCell
     momentum: std::cell::RefCell<Momentum>,
     background_image: Option<Arc<viewcamera::camera::CameraFrameData>>,
     camera_sender: Option<CameraCommandSender>,

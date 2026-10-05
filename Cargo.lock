@@ -4059,10 +4059,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "viewcore-touch"
-version = "0.1.0"
-
-[[package]]
 name = "viewframe"
 version = "0.1.0"
 dependencies = [
@@ -4082,8 +4078,8 @@ version = "0.1.0"
 dependencies = [
  "iced",
  "viewcamera",
- "viewcore-touch",
  "viewink",
+ "zephyra",
 ]
 
 [[package]]
@@ -4123,12 +4119,12 @@ dependencies = [
  "tiny-skia",
  "tokio",
  "viewcamera",
- "viewcore-touch",
  "viewframe",
  "viewgfx",
  "viewicon",
  "viewink",
  "windows-sys 0.59.0",
+ "zephyra",
  "zephyra-iced",
 ]
 
