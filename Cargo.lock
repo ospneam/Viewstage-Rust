@@ -4083,14 +4083,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "viewicon"
-version = "0.1.0"
-dependencies = [
- "iced",
- "tiny-skia",
-]
-
-[[package]]
 name = "viewink"
 version = "0.1.0"
 dependencies = [
@@ -4121,7 +4113,6 @@ dependencies = [
  "viewcamera",
  "viewframe",
  "viewgfx",
- "viewicon",
  "viewink",
  "windows-sys 0.59.0",
  "zephyra",
@@ -5152,6 +5143,7 @@ version = "0.1.0"
 dependencies = [
  "iced",
  "iced_graphics",
+ "tiny-skia",
  "zephyra",
 ]
 

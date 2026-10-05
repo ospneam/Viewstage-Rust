@@ -16,3 +16,6 @@ iced = { version = "0.14", default-features = false, features = ["canvas", "imag
 # 不显式声明的话，本 crate 单独构建时 `draw_image` 不存在，而整仓构建时又恰好存在
 # （被根 crate 的 feature 统一打开）——那种"能编过但换种构建方式就炸"的依赖更糟。
 iced_graphics = { version = "0.14", features = ["image"] }
+# tiny-skia：图标栅格化。解析式覆盖 AA，产出 straight RGBA 纹理。
+# 走 tiny-skia 而不是 iced 的 resvg 路径，理由见 src/icon.rs 顶部。
+tiny-skia = "0.11"

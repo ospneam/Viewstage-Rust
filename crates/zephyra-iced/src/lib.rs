@@ -25,6 +25,8 @@
 //! 走 iced 控件意味着丢失控件级能力（焦点、文本输入、无障碍树）。对工具栏这类
 //! 纯展示 UI 无所谓；若将来需要，得另开一条控件树通道，而不是把这条改回去。
 
+pub mod icon;
+
 use std::sync::Arc;
 
 use iced::widget::canvas::{self, Frame, Geometry, Program};
@@ -39,8 +41,8 @@ use zephyra::paint::{Command, DisplayList, TextureRef};
 /// # 宿主边界
 ///
 /// 核心库刻意不认识 iced 的 `Handle`——它只持有一个不透明的 `TextureRef`（一段
-/// 字符串 id）。由宿主决定 id 到实际纹理的映射，适配层因此不需要知道 `viewicon`
-/// 或任何具体资产系统。
+/// 字符串 id）。由宿主决定 id 到实际纹理的映射，适配层因此不需要知道具体资产
+/// 系统；[`crate::icon::IconResolver`] 就是一个实现，它把 id 当图标名用。
 pub trait TextureResolver {
     /// 取纹理；`None` 表示该 id 未注册，对应命令会被跳过。
     fn resolve(&self, texture: &TextureRef) -> Option<iced::widget::image::Handle>;
